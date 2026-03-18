@@ -7,13 +7,15 @@ mod tray;
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MAX_KNOBS: usize = 8;
 const MAX_CONTROLS: usize = 32; // 4 pages × 8 controls per setup
-const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Fallback poll interval in case the pactl watcher misses an event.
+const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Color scheme indices chosen to be visually distinct across the 85-entry palette.
 const COLOR_POOL: &[u8] = &[
@@ -72,8 +74,8 @@ fn main() -> Result<()> {
     }
 
     // 4. Configure page 1 (PipeWire streams)
-    let mut assigned_streams: Vec<pipewire::AudioStream> = streams.into_iter().take(MAX_KNOBS).collect();
-    apply_stream_config(&mut dev, &assigned_streams)?;
+    let mut assigned_streams: Vec<pipewire::AudioStream> = streams.into_iter().take(MAX_CONTROLS).collect();
+    apply_stream_config(&mut dev, &assigned_streams, 0)?;
 
     // 5. Open MIDI connections
     info!("Opening MIDI connections...");
@@ -98,10 +100,19 @@ fn main() -> Result<()> {
     let tray_shutdown = shutdown.clone();
     let _tray_handle = tray::spawn(tray_shutdown);
 
+    // 9. Start PipeWire event watcher
+    let pw_events = pipewire::watch_changes();
+
     info!("Ready! Turn knobs to adjust volume, press buttons to mute/unmute.");
 
-    // 9. Main event loop
+    // 10. Main event loop
     let mut last_scan = Instant::now();
+    // Remember last known volume/mute per app so we can restore it when a stream restarts
+    let mut volume_memory: HashMap<String, (f64, bool)> = HashMap::new();
+    // Seed memory with current state
+    for stream in &assigned_streams {
+        volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
+    }
     // Pending latest values per control index (None = no pending change)
     let mut pending_knobs: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
     let mut pending_buttons: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
@@ -156,6 +167,7 @@ fn main() -> Result<()> {
                         warn!("Failed to set volume for {}: {}", stream.app_name, e);
                     }
                     stream.volume = new_volume;
+                    volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
                 }
             }
             if let Some(value) = pending_buttons[index].take() {
@@ -168,6 +180,7 @@ fn main() -> Result<()> {
                             warn!("Failed to toggle mute for {}: {}", stream.app_name, e);
                         }
                         stream.muted = now_muted;
+                        volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
                     }
                 }
             }
@@ -213,8 +226,9 @@ fn main() -> Result<()> {
                 let new_ids: Vec<&str> = fresh.iter().map(|m| m.user_id.as_str()).collect();
 
                 if old_ids != new_ids {
-                    info!("Discord members changed: {} -> {} members", discord_members.len(), fresh.len());
-                    if let Err(e) = apply_discord_config(&mut dev, &fresh) {
+                    let prev_len = discord_members.len();
+                    info!("Discord members changed: {} -> {} members", prev_len, fresh.len());
+                    if let Err(e) = apply_discord_config(&mut dev, &fresh, prev_len) {
                         warn!("Failed to configure Discord page: {}", e);
                     }
                     if let Err(e) = sync_discord_midi_state(&mut midi_out, &fresh) {
@@ -225,14 +239,18 @@ fn main() -> Result<()> {
             }
         }
 
-        // Periodically rescan PipeWire streams
-        if last_scan.elapsed() >= STREAM_POLL_INTERVAL {
+        // Rescan PipeWire streams on events or fallback timer
+        let pw_changed = pw_events.try_recv().is_ok();
+        // Drain any additional events that arrived in the same batch
+        while pw_events.try_recv().is_ok() {}
+        if pw_changed || last_scan.elapsed() >= STREAM_POLL_INTERVAL {
             last_scan = Instant::now();
             if let Err(e) = rescan_streams(
                 &mut dev,
                 &mut assigned_streams,
                 &mut midi_out,
                 &config,
+                &volume_memory,
             ) {
                 warn!("Stream rescan failed: {}", e);
             }
@@ -250,7 +268,7 @@ fn main() -> Result<()> {
 
 // ---- Page 1: PipeWire stream config ----
 
-fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStream]) -> Result<()> {
+fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStream], prev_count: usize) -> Result<()> {
     dev.start_config_update()?;
     for (i, stream) in streams.iter().enumerate() {
         info!("Knob {}: {} (id={}, vol={:.0}%{})",
@@ -261,7 +279,8 @@ fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStr
         dev.send_midi_knob_config(&make_knob_config(i, stream))?;
         dev.send_midi_button_config(&make_button_config(i, stream))?;
     }
-    for i in streams.len()..MAX_CONTROLS {
+    // Only clear slots that were previously occupied but no longer are
+    for i in streams.len()..prev_count {
         dev.send_clear_knob(0, i as u8)?;
         dev.send_clear_button(0, i as u8)?;
     }
@@ -283,36 +302,69 @@ fn rescan_streams(
     assigned: &mut Vec<pipewire::AudioStream>,
     midi_out: &mut midir::MidiOutputConnection,
     config: &config::Config,
+    volume_memory: &HashMap<String, (f64, bool)>,
 ) -> Result<()> {
     let fresh = pipewire::list_streams(config)?;
-    let fresh: Vec<_> = fresh.into_iter().take(MAX_KNOBS).collect();
+    let mut fresh: Vec<_> = fresh.into_iter().take(MAX_CONTROLS).collect();
 
     let old_ids: Vec<u32> = assigned.iter().map(|s| s.id).collect();
     let new_ids: Vec<u32> = fresh.iter().map(|s| s.id).collect();
 
     if old_ids != new_ids {
-        info!("Streams changed: {} -> {} streams", assigned.len(), fresh.len());
-        apply_stream_config(dev, &fresh)?;
+        let prev_count = assigned.len();
+        // Restore remembered volumes for any streams whose node ID changed
+        for stream in &mut fresh {
+            let is_new_id = !old_ids.contains(&stream.id);
+            if is_new_id {
+                if let Some(&(vol, muted)) = volume_memory.get(&stream.app_name) {
+                    if (stream.volume - vol).abs() > 0.005 || stream.muted != muted {
+                        info!("Restoring volume for {} -> {:.0}%{}", stream.app_name, vol * 100.0,
+                            if muted { " MUTED" } else { "" });
+                        let _ = pipewire::set_volume(stream.id, vol);
+                        if muted != stream.muted {
+                            let _ = pipewire::toggle_mute(stream.id);
+                        }
+                        stream.volume = vol;
+                        stream.muted = muted;
+                    }
+                }
+            }
+        }
+        info!("Streams changed: {} -> {} streams", prev_count, fresh.len());
+        apply_stream_config(dev, &fresh, prev_count)?;
         sync_midi_state(midi_out, &fresh)?;
         *assigned = fresh;
         return Ok(());
     }
 
-    let mut any_changed = false;
+    let mut display_changed = false;
     for (i, (old, new)) in assigned.iter().zip(fresh.iter()).enumerate() {
         if old.media_name != new.media_name {
             debug!("Stream {} media_name changed: {:?} -> {:?}", i, old.media_name, new.media_name);
-            if !any_changed {
+            if !display_changed {
                 dev.start_config_update()?;
-                any_changed = true;
+                display_changed = true;
             }
             dev.send_midi_button_config(&make_button_config(i, new))?;
         }
     }
-    if any_changed {
+    if display_changed {
         dev.end_config_update()?;
     }
-    for (old, new) in assigned.iter_mut().zip(fresh.iter()) {
+
+    // Sync encoder positions for any externally-changed volumes/mutes
+    for (i, (old, new)) in assigned.iter_mut().zip(fresh.iter()).enumerate() {
+        let vol_delta = (old.volume - new.volume).abs();
+        if vol_delta > 0.005 {
+            debug!("Stream {} volume drifted: {:.2} -> {:.2}", i, old.volume, new.volume);
+            midi::send_knob_value(midi_out, i, volume_to_cc(new.volume))?;
+            old.volume = new.volume;
+        }
+        if old.muted != new.muted {
+            debug!("Stream {} mute drifted: {} -> {}", i, old.muted, new.muted);
+            midi::send_button_value(midi_out, i, if new.muted { 127 } else { 0 })?;
+            old.muted = new.muted;
+        }
         old.media_name = new.media_name.clone();
     }
 
@@ -374,7 +426,7 @@ fn make_button_config(i: usize, stream: &pipewire::AudioStream) -> protocol::Mid
 
 // ---- Page 2: Discord voice config ----
 
-fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMember]) -> Result<()> {
+fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMember], prev_count: usize) -> Result<()> {
     dev.start_config_update()?;
     for (i, member) in members.iter().enumerate() {
         let nick = pipewire::truncate_to_chars(&member.nick, 12);
@@ -393,7 +445,7 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
             max_value: 127,
             control_name: nick,
             color_scheme: color,
-            haptic_mode: protocol::KnobHapticMode::Normal,
+            haptic_mode: protocol::KnobHapticMode::CentreIndent,
             haptic_indent1: 0xFF,
             haptic_indent2: 0xFF,
             haptic_steps: 0,
@@ -418,7 +470,7 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
             step_names: vec!["".to_string(); 16],
         })?;
     }
-    for i in members.len()..MAX_CONTROLS {
+    for i in members.len()..prev_count {
         dev.send_clear_knob(1, i as u8)?;
         dev.send_clear_button(1, i as u8)?;
     }

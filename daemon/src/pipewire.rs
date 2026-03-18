@@ -2,9 +2,12 @@
 
 use crate::config::Config;
 use anyhow::{Context, Result, bail};
-use log::debug;
+use log::{debug, warn};
 use serde::Deserialize;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 
 #[derive(Debug, Clone)]
 pub struct AudioStream {
@@ -171,8 +174,43 @@ pub fn toggle_mute(id: u32) -> Result<()> {
     Ok(())
 }
 
-/// Get the current mute state for a PipeWire node.
-pub fn is_muted(id: u32) -> Result<bool> {
-    let (_, muted) = get_volume_and_mute(id)?;
-    Ok(muted)
+/// Watch for PipeWire sink-input events via `pactl subscribe`.
+/// Returns a receiver that fires whenever a stream is added, removed, or changed.
+/// Runs in a background thread and auto-restarts if pactl exits.
+pub fn watch_changes() -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("pw-watch".into())
+        .spawn(move || {
+            loop {
+                let child = Command::new("pactl")
+                    .args(["subscribe"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn();
+
+                match child {
+                    Err(e) => {
+                        warn!("Failed to spawn pactl subscribe: {}. Falling back to polling.", e);
+                        return;
+                    }
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().unwrap();
+                        let reader = BufReader::new(stdout);
+                        for line in reader.lines() {
+                            let Ok(line) = line else { break };
+                            // We care about sink-input events (audio streams)
+                            if line.contains("sink-input") {
+                                debug!("PipeWire event: {}", line);
+                                let _ = tx.send(());
+                            }
+                        }
+                        let _ = child.wait();
+                        warn!("pactl subscribe exited, restarting watcher...");
+                    }
+                }
+            }
+        })
+        .expect("Failed to spawn pw-watch thread");
+    rx
 }
