@@ -115,7 +115,7 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 }
 
 /// Truncate a string to at most `max` characters (not bytes).
-fn truncate_to_chars(s: &str, max: usize) -> String {
+pub fn truncate_to_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

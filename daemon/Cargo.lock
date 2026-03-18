@@ -985,6 +985,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "ksni",
+ "libc",
  "log",
  "midir",
  "png",

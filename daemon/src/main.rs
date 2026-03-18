@@ -1,4 +1,5 @@
 mod config;
+mod discord;
 mod midi;
 mod pipewire;
 mod protocol;
@@ -11,10 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MAX_KNOBS: usize = 8;
+const MAX_CONTROLS: usize = 32; // 4 pages × 8 controls per setup
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Color scheme indices chosen to be visually distinct across the 85-entry palette.
-/// Avoids black/dark entries so text remains readable.
 const COLOR_POOL: &[u8] = &[
     0,  // #FF94A6 pink
     1,  // #FFA529 orange
@@ -27,7 +28,7 @@ const COLOR_POOL: &[u8] = &[
 ];
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Set up Ctrl+C / SIGTERM handler
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -54,7 +55,7 @@ fn main() -> Result<()> {
     let version = dev.get_version()?;
     info!("Firmware: {}.{}.{} ({})", version.major, version.minor, version.patch, version.commit);
 
-    // 2. Switch to MIDI mode and set setup name
+    // 2. Switch to MIDI mode and set setup names
     info!("Switching to MIDI mode...");
     dev.set_mode(protocol::Mode::Midi, 0)?;
     dev.set_setup_name(0, "Rotool")?;
@@ -70,7 +71,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 4. Configure all knobs and buttons in a single transaction
+    // 4. Configure page 1 (PipeWire streams)
     let mut assigned_streams: Vec<pipewire::AudioStream> = streams.into_iter().take(MAX_KNOBS).collect();
     apply_stream_config(&mut dev, &assigned_streams)?;
 
@@ -80,21 +81,73 @@ fn main() -> Result<()> {
     let (_midi_in_conn, midi_rx) = midi::open_input()?;
 
     // 6. Set initial knob positions to match current volumes
-    // Small delay to let MIDI connection stabilize
     std::thread::sleep(Duration::from_millis(200));
     sync_midi_state(&mut midi_out, &assigned_streams)?;
 
-    // 7. Start tray icon (quit triggers shutdown flag)
+    // 7. Start Discord integration on page 2 (if configured)
+    let discord_handle = if let Some(ref dc) = config.discord {
+        dev.set_setup_name(1, "Discord")?;
+        info!("Starting Discord voice integration...");
+        Some(discord::start(dc.client_id.clone(), dc.client_secret.clone()))
+    } else {
+        None
+    };
+    let mut discord_members: Vec<discord::VoiceMember> = vec![];
+
+    // 8. Start tray icon
     let tray_shutdown = shutdown.clone();
     let _tray_handle = tray::spawn(tray_shutdown);
 
     info!("Ready! Turn knobs to adjust volume, press buttons to mute/unmute.");
 
-    // 8. Main event loop
+    // 9. Main event loop
     let mut last_scan = Instant::now();
+    // Pending latest values per control index (None = no pending change)
+    let mut pending_knobs: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
+    let mut pending_buttons: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
+    let mut pending_discord_knobs: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
+    let mut pending_discord_buttons: [Option<u8>; MAX_KNOBS] = [None; MAX_KNOBS];
+
     while !shutdown.load(Ordering::SeqCst) {
-        match midi_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(midi::DeviceEvent::KnobTurn { index, value }) => {
+        // Wait for at least one event, then drain all pending to batch
+        let first = midi_rx.recv_timeout(Duration::from_millis(100));
+        let events: Vec<_> = match first {
+            Ok(evt) => {
+                let mut batch = vec![evt];
+                while let Ok(e) = midi_rx.try_recv() {
+                    batch.push(e);
+                }
+                batch
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => vec![],
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                warn!("MIDI input disconnected");
+                break;
+            }
+        };
+
+        // Coalesce: keep only the latest value per control
+        for evt in events {
+            match evt {
+                midi::DeviceEvent::KnobTurn { index, value } if index < MAX_KNOBS => {
+                    pending_knobs[index] = Some(value);
+                }
+                midi::DeviceEvent::ButtonPress { index, value } if index < MAX_KNOBS => {
+                    pending_buttons[index] = Some(value);
+                }
+                midi::DeviceEvent::DiscordKnobTurn { index, value } if index < MAX_KNOBS => {
+                    pending_discord_knobs[index] = Some(value);
+                }
+                midi::DeviceEvent::DiscordButtonPress { index, value } if index < MAX_KNOBS => {
+                    pending_discord_buttons[index] = Some(value);
+                }
+                _ => {}
+            }
+        }
+
+        // Apply coalesced PipeWire knob changes
+        for index in 0..MAX_KNOBS {
+            if let Some(value) = pending_knobs[index].take() {
                 if index < assigned_streams.len() {
                     let stream = &mut assigned_streams[index];
                     let new_volume = cc_to_volume(value);
@@ -105,14 +158,11 @@ fn main() -> Result<()> {
                     stream.volume = new_volume;
                 }
             }
-            Ok(midi::DeviceEvent::ButtonPress { index, value }) => {
+            if let Some(value) = pending_buttons[index].take() {
                 if index < assigned_streams.len() {
                     let stream = &mut assigned_streams[index];
-                    // Toggle mode: device alternates 127/0 on each press
                     let now_muted = value > 0;
                     debug!("Button {}: {} muted={}", index, stream.app_name, now_muted);
-
-                    // Set mute state to match button
                     if now_muted != stream.muted {
                         if let Err(e) = pipewire::toggle_mute(stream.id) {
                             warn!("Failed to toggle mute for {}: {}", stream.app_name, e);
@@ -121,10 +171,57 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                warn!("MIDI input disconnected");
-                break;
+        }
+
+        // Apply coalesced Discord changes
+        if let Some(ref handle) = discord_handle {
+            for index in 0..MAX_KNOBS {
+                if let Some(value) = pending_discord_knobs[index].take() {
+                    if index < discord_members.len() {
+                        let member = &mut discord_members[index];
+                        let new_volume = cc_to_discord_volume(value);
+                        debug!("Discord knob {}: {} -> vol {}", index, member.nick, new_volume);
+                        let _ = handle.cmd_tx.send(discord::Command::SetVolume {
+                            user_id: member.user_id.clone(),
+                            volume: new_volume,
+                        });
+                        member.volume = new_volume;
+                    }
+                }
+                if let Some(value) = pending_discord_buttons[index].take() {
+                    if index < discord_members.len() {
+                        let member = &mut discord_members[index];
+                        let now_muted = value > 0;
+                        debug!("Discord button {}: {} muted={}", index, member.nick, now_muted);
+                        if now_muted != member.muted {
+                            let _ = handle.cmd_tx.send(discord::Command::SetMute {
+                                user_id: member.user_id.clone(),
+                                muted: now_muted,
+                            });
+                            member.muted = now_muted;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for Discord member updates
+        if let Some(ref handle) = discord_handle {
+            while let Ok(members) = handle.members_rx.try_recv() {
+                let fresh: Vec<_> = members.into_iter().take(MAX_KNOBS).collect();
+                let old_ids: Vec<&str> = discord_members.iter().map(|m| m.user_id.as_str()).collect();
+                let new_ids: Vec<&str> = fresh.iter().map(|m| m.user_id.as_str()).collect();
+
+                if old_ids != new_ids {
+                    info!("Discord members changed: {} -> {} members", discord_members.len(), fresh.len());
+                    if let Err(e) = apply_discord_config(&mut dev, &fresh) {
+                        warn!("Failed to configure Discord page: {}", e);
+                    }
+                    if let Err(e) = sync_discord_midi_state(&mut midi_out, &fresh) {
+                        warn!("Failed to sync Discord MIDI state: {}", e);
+                    }
+                }
+                discord_members = fresh;
             }
         }
 
@@ -142,7 +239,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 9. Cleanup: clear the device display
+    // 10. Cleanup: clear both pages
     info!("Shutting down, clearing display...");
     if let Err(e) = dev.clear_all() {
         warn!("Failed to clear display: {}", e);
@@ -151,7 +248,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Configure all stream knobs/buttons and clear unused slots in one transaction.
+// ---- Page 1: PipeWire stream config ----
+
 fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStream]) -> Result<()> {
     dev.start_config_update()?;
     for (i, stream) in streams.iter().enumerate() {
@@ -163,7 +261,7 @@ fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStr
         dev.send_midi_knob_config(&make_knob_config(i, stream))?;
         dev.send_midi_button_config(&make_button_config(i, stream))?;
     }
-    for i in streams.len()..MAX_KNOBS {
+    for i in streams.len()..MAX_CONTROLS {
         dev.send_clear_knob(0, i as u8)?;
         dev.send_clear_button(0, i as u8)?;
     }
@@ -171,7 +269,6 @@ fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStr
     Ok(())
 }
 
-/// Send MIDI CC to set knob positions and button LEDs to match stream state.
 fn sync_midi_state(midi_out: &mut midir::MidiOutputConnection, streams: &[pipewire::AudioStream]) -> Result<()> {
     for (i, stream) in streams.iter().enumerate() {
         let cc_value = volume_to_cc(stream.volume);
@@ -181,7 +278,6 @@ fn sync_midi_state(midi_out: &mut midir::MidiOutputConnection, streams: &[pipewi
     Ok(())
 }
 
-/// Rescan PipeWire streams and update device config for any changes.
 fn rescan_streams(
     dev: &mut protocol::Device,
     assigned: &mut Vec<pipewire::AudioStream>,
@@ -195,7 +291,6 @@ fn rescan_streams(
     let new_ids: Vec<u32> = fresh.iter().map(|s| s.id).collect();
 
     if old_ids != new_ids {
-        // Stream set changed — full reconfigure
         info!("Streams changed: {} -> {} streams", assigned.len(), fresh.len());
         apply_stream_config(dev, &fresh)?;
         sync_midi_state(midi_out, &fresh)?;
@@ -203,7 +298,6 @@ fn rescan_streams(
         return Ok(());
     }
 
-    // Same streams — check for media_name changes and update buttons only
     let mut any_changed = false;
     for (i, (old, new)) in assigned.iter().zip(fresh.iter()).enumerate() {
         if old.media_name != new.media_name {
@@ -218,7 +312,6 @@ fn rescan_streams(
     if any_changed {
         dev.end_config_update()?;
     }
-    // Update media_name in assigned streams
     for (old, new) in assigned.iter_mut().zip(fresh.iter()) {
         old.media_name = new.media_name.clone();
     }
@@ -226,12 +319,13 @@ fn rescan_streams(
     Ok(())
 }
 
-/// Pick a color for a stream: config override > stable hash of app name into pool.
+fn pick_color_from_name(name: &str) -> u8 {
+    let hash = name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    COLOR_POOL[(hash as usize) % COLOR_POOL.len()]
+}
+
 fn pick_color(stream: &pipewire::AudioStream) -> u8 {
-    stream.color_scheme.unwrap_or_else(|| {
-        let hash = stream.app_name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-        COLOR_POOL[(hash as usize) % COLOR_POOL.len()]
-    })
+    stream.color_scheme.unwrap_or_else(|| pick_color_from_name(&stream.app_name))
 }
 
 fn make_knob_config(i: usize, stream: &pipewire::AudioStream) -> protocol::MidiKnobConfig {
@@ -270,23 +364,98 @@ fn make_button_config(i: usize, stream: &pipewire::AudioStream) -> protocol::Mid
         max_value: 127,
         control_name,
         color_scheme: color,
-        led_on_color: 14,  // white
-        led_off_color: 70, // dark
+        led_on_color: 14,
+        led_off_color: 70,
         haptic_mode: protocol::SwitchHapticMode::Toggle,
         haptic_steps: 0,
         step_names: vec!["".to_string(); 16],
     }
 }
 
-/// Convert a volume float (0.0-1.0) to a MIDI CC value (0-127).
+// ---- Page 2: Discord voice config ----
+
+fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMember]) -> Result<()> {
+    dev.start_config_update()?;
+    for (i, member) in members.iter().enumerate() {
+        let nick = pipewire::truncate_to_chars(&member.nick, 12);
+        let color = pick_color_from_name(&member.nick);
+
+        info!("Discord knob {}: {} (vol={}, muted={})", i + 1, nick, member.volume, member.muted);
+
+        dev.send_midi_knob_config(&protocol::MidiKnobConfig {
+            setup_index: 1,
+            control_index: i as u8,
+            control_mode: protocol::ControlMode::Cc7Bit,
+            control_channel: midi::MIDI_CHANNEL,
+            control_param: midi::DISCORD_KNOB_CC_BASE + i as u8,
+            nrpn_address: 0,
+            min_value: 0,
+            max_value: 127,
+            control_name: nick,
+            color_scheme: color,
+            haptic_mode: protocol::KnobHapticMode::Normal,
+            haptic_indent1: 0xFF,
+            haptic_indent2: 0xFF,
+            haptic_steps: 0,
+            step_names: vec!["".to_string(); 16],
+        })?;
+
+        dev.send_midi_button_config(&protocol::MidiButtonConfig {
+            setup_index: 1,
+            control_index: i as u8,
+            control_mode: protocol::ControlMode::Cc7Bit,
+            control_channel: midi::MIDI_CHANNEL,
+            control_param: midi::DISCORD_BUTTON_CC_BASE + i as u8,
+            nrpn_address: 0xFFFF,
+            min_value: 0,
+            max_value: 127,
+            control_name: String::new(),
+            color_scheme: 70, // black/unlit
+            led_on_color: 14,
+            led_off_color: 70,
+            haptic_mode: protocol::SwitchHapticMode::Toggle,
+            haptic_steps: 0,
+            step_names: vec!["".to_string(); 16],
+        })?;
+    }
+    for i in members.len()..MAX_CONTROLS {
+        dev.send_clear_knob(1, i as u8)?;
+        dev.send_clear_button(1, i as u8)?;
+    }
+    dev.end_config_update()?;
+    Ok(())
+}
+
+fn sync_discord_midi_state(midi_out: &mut midir::MidiOutputConnection, members: &[discord::VoiceMember]) -> Result<()> {
+    for (i, member) in members.iter().enumerate() {
+        let cc_value = discord_volume_to_cc(member.volume);
+        midi::send_discord_knob_value(midi_out, i, cc_value)?;
+        midi::send_discord_button_value(midi_out, i, if member.muted { 127 } else { 0 })?;
+    }
+    Ok(())
+}
+
+// ---- Volume conversions ----
+
+/// PipeWire: CC 0-127 maps to volume 0.0-1.0
 fn volume_to_cc(volume: f64) -> u8 {
     (volume.clamp(0.0, 1.0) * 127.0).round() as u8
 }
 
-/// Convert a MIDI CC value (0-127) to a volume float (0.0-1.0).
 fn cc_to_volume(cc: u8) -> f64 {
     cc as f64 / 127.0
 }
+
+/// Discord: CC 0-127 maps to volume 0-200
+fn discord_volume_to_cc(volume: u16) -> u8 {
+    ((volume.min(200) as f64 / 200.0) * 127.0).round() as u8
+}
+
+fn cc_to_discord_volume(cc: u8) -> u16 {
+    ((cc as f64 / 127.0) * 200.0).round() as u16
+}
+
+// ---- Device discovery ----
 
 fn find_roto_control_port() -> Option<String> {
     if let Ok(ports) = serialport::available_ports() {

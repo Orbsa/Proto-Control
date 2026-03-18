@@ -11,6 +11,8 @@ use std::sync::mpsc;
 pub const MIDI_CHANNEL: u8 = 0; // Channel 1 (0-indexed)
 pub const KNOB_CC_BASE: u8 = 1; // Knobs use CC 1-8
 pub const BUTTON_CC_BASE: u8 = 9; // Buttons use CC 9-16
+pub const DISCORD_KNOB_CC_BASE: u8 = 17; // Discord knobs CC 17-24
+pub const DISCORD_BUTTON_CC_BASE: u8 = 25; // Discord buttons CC 25-32
 pub const NUM_CONTROLS: usize = 8;
 
 /// Events received from the device.
@@ -18,6 +20,8 @@ pub const NUM_CONTROLS: usize = 8;
 pub enum DeviceEvent {
     KnobTurn { index: usize, value: u8 },
     ButtonPress { index: usize, value: u8 },
+    DiscordKnobTurn { index: usize, value: u8 },
+    DiscordButtonPress { index: usize, value: u8 },
 }
 
 /// Open the MIDI output connection to the Roto-Control.
@@ -90,10 +94,14 @@ pub fn open_input() -> Result<(MidiInputConnection<()>, mpsc::Receiver<DeviceEve
                 } else if cc >= BUTTON_CC_BASE && cc < BUTTON_CC_BASE + NUM_CONTROLS as u8 {
                     let index = (cc - BUTTON_CC_BASE) as usize;
                     let _ = tx.send(DeviceEvent::ButtonPress { index, value });
+                } else if cc >= DISCORD_KNOB_CC_BASE && cc < DISCORD_KNOB_CC_BASE + NUM_CONTROLS as u8 {
+                    let index = (cc - DISCORD_KNOB_CC_BASE) as usize;
+                    let _ = tx.send(DeviceEvent::DiscordKnobTurn { index, value });
+                } else if cc >= DISCORD_BUTTON_CC_BASE && cc < DISCORD_BUTTON_CC_BASE + NUM_CONTROLS as u8 {
+                    let index = (cc - DISCORD_BUTTON_CC_BASE) as usize;
+                    let _ = tx.send(DeviceEvent::DiscordButtonPress { index, value });
                 } else {
-                    debug!("MIDI RX: ignoring CC {} (not in knob {}-{} or button {}-{} range)",
-                        cc, KNOB_CC_BASE, KNOB_CC_BASE + NUM_CONTROLS as u8 - 1,
-                        BUTTON_CC_BASE, BUTTON_CC_BASE + NUM_CONTROLS as u8 - 1);
+                    debug!("MIDI RX: ignoring CC {}", cc);
                 }
             },
             (),
@@ -119,6 +127,26 @@ pub fn send_button_value(conn: &mut MidiOutputConnection, index: usize, value: u
         bail!("Button index {} out of range", index);
     }
     let msg = [0xB0 | MIDI_CHANNEL, BUTTON_CC_BASE + index as u8, value];
+    conn.send(&msg)
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+/// Send a CC value to set a Discord knob position.
+pub fn send_discord_knob_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
+    if index >= NUM_CONTROLS {
+        bail!("Discord knob index {} out of range", index);
+    }
+    let msg = [0xB0 | MIDI_CHANNEL, DISCORD_KNOB_CC_BASE + index as u8, value];
+    conn.send(&msg)
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+/// Send a CC value to set a Discord button LED state.
+pub fn send_discord_button_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
+    if index >= NUM_CONTROLS {
+        bail!("Discord button index {} out of range", index);
+    }
+    let msg = [0xB0 | MIDI_CHANNEL, DISCORD_BUTTON_CC_BASE + index as u8, value];
     conn.send(&msg)
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }

@@ -9,6 +9,13 @@ use std::process::Command;
 pub struct Config {
     #[serde(default)]
     pub streams: Vec<StreamOverride>,
+    pub discord: Option<DiscordConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DiscordConfig {
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 #[derive(Debug, Deserialize)]

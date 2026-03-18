@@ -174,18 +174,16 @@ impl Device {
                 break;
             }
             if header[0] == MSG_COMMAND {
-                // Unsolicited device notification — drain it and keep looking
-                debug!("Skipping unsolicited device message (0x5A)");
-                let original_timeout = self.port.timeout();
-                self.port.set_timeout(Duration::from_millis(50))?;
-                let mut drain = [0u8; 256];
-                loop {
-                    match self.port.read(&mut drain) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => continue,
-                    }
+                // Unsolicited device notification — read its header to know the length, then skip
+                let mut notif_hdr = [0u8; 4]; // group, subcommand, len_hi, len_lo
+                self.port.read_exact(&mut notif_hdr).context("Reading unsolicited notification header")?;
+                let notif_len = ((notif_hdr[2] as usize) << 8) | (notif_hdr[3] as usize);
+                debug!("Skipping unsolicited device message (0x5A): group=0x{:02x} sub=0x{:02x} len={}",
+                    notif_hdr[0], notif_hdr[1], notif_len);
+                if notif_len > 0 {
+                    let mut discard = vec![0u8; notif_len];
+                    self.port.read_exact(&mut discard).context("Draining unsolicited notification data")?;
                 }
-                self.port.set_timeout(original_timeout)?;
                 continue;
             }
             bail!("Expected response 0xA5, got 0x{:02x}", header[0]);
@@ -285,12 +283,14 @@ impl Device {
         Ok(())
     }
 
-    /// Clear all knob and button configs (wraps in config update transaction).
+    /// Clear all knob and button configs on setup 0 and setup 1 (32 controls each).
     pub fn clear_all(&mut self) -> Result<()> {
         self.start_config_update()?;
-        for i in 0..8u8 {
-            self.send_clear_knob(0, i)?;
-            self.send_clear_button(0, i)?;
+        for setup in 0..2u8 {
+            for i in 0..32u8 {
+                self.send_clear_knob(setup, i)?;
+                self.send_clear_button(setup, i)?;
+            }
         }
         self.end_config_update()?;
         Ok(())
