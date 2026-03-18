@@ -1,0 +1,5 @@
+.direnv/
+**/target/
+StreamDeck-DiscordVolumeMixer2/
+extracted/
+.envrc
