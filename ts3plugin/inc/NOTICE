@@ -1,0 +1,13 @@
+TeamSpeak 3 Client Plugin SDK Headers
+======================================
+
+The header files in this directory are part of the TeamSpeak 3 Client Plugin
+SDK, copyright (c) TeamSpeak Systems GmbH.
+
+These headers define the public plugin API for TeamSpeak 3 and are distributed
+as part of the TeamSpeak 3 Plugin SDK. They were originally obtained from the
+ACRE2 project (https://github.com/IDI-Systems/acre2), which is licensed under
+the GNU General Public License v3 (GPLv3).
+
+The headers are redistributed here under the terms of the GPLv3. See the
+ACRE2 project repository for the full license text.

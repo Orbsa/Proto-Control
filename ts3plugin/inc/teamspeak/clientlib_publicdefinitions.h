@@ -1,0 +1,30 @@
+/*
+ * TeamSpeak 3 Client Plugin SDK
+ * Copyright (c) TeamSpeak Systems GmbH
+ * Obtained via ACRE2 (https://github.com/IDI-Systems/acre2) — GPLv3
+ */
+#ifndef CLIENTLIB_PUBLICDEFINITIONS_H
+#define CLIENTLIB_PUBLICDEFINITIONS_H
+
+enum Visibility {
+    ENTER_VISIBILITY = 0,
+    RETAIN_VISIBILITY,
+    LEAVE_VISIBILITY
+};
+
+enum ConnectStatus {
+    STATUS_DISCONNECTED = 0,
+    STATUS_CONNECTING,
+    STATUS_CONNECTED,
+    STATUS_CONNECTION_ESTABLISHING,
+    STATUS_CONNECTION_ESTABLISHED,
+};
+
+enum LocalTestMode {
+    TEST_MODE_OFF = 0,
+    TEST_MODE_VOICE_LOCAL_ONLY,
+    TEST_MODE_VOICE_LOCAL_AND_REMOTE,
+    TEST_MODE_TALK_STATUS_CHANGES_ONLY
+};
+
+#endif //CLIENTLIB_PUBLICDEFINITIONS_H
