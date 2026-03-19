@@ -146,6 +146,10 @@ enum Message {
     Ts3UserColorSelected(usize, Option<u8>),
     Ts3UserPriorityChanged(usize, String),
     RemoveTs3User(usize),
+    // Enable toggles
+    SetPipewireEnabled(bool),
+    SetDiscordEnabled(bool),
+    SetTeamspeakEnabled(bool),
     // Save
     Save,
 }
@@ -153,7 +157,7 @@ enum Message {
 // ---- Init -----------------------------------------------------------------
 
 pub fn run() -> iced::Result {
-    iced::application("Rotool Settings", update, view)
+    iced::application("Proto-Control Settings", update, view)
         .window_size((780.0, 580.0))
         .theme(|_| Theme::Dark)
         .run_with(init)
@@ -300,6 +304,15 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
         Message::Ts3UserPriorityChanged(i, s) => { if let Some(r) = app.ts3_users.get_mut(i) { r.priority_input = s; } }
         Message::RemoveTs3User(i) => { if i < app.ts3_users.len() { app.ts3_users.remove(i); } }
 
+        // Enable toggles
+        Message::SetPipewireEnabled(v) => { app.config.pipewire_enabled = v; }
+        Message::SetDiscordEnabled(v) => {
+            if let Some(ref mut dc) = app.config.discord { dc.enabled = v; }
+        }
+        Message::SetTeamspeakEnabled(v) => {
+            if let Some(ref mut ts) = app.config.teamspeak { ts.enabled = v; }
+        }
+
         // Save
         Message::Save => {
             app.config.streams.clear();
@@ -308,7 +321,8 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                 let has_override = row.name_input != row.raw_name
                     || row.color.is_some()
                     || row.accent_color.is_some()
-                    || row.ignored;
+                    || row.ignored
+                    || row.use_mpris;
                 if !has_override { continue; }
 
                 let binary = if row.binary.is_empty() { None } else { Some(row.binary.clone()) };
@@ -409,8 +423,13 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
     let header = row![
         text("PipeWire Streams").size(16),
         iced::widget::Space::with_width(Length::Fill),
+        checkbox("Enabled", app.config.pipewire_enabled)
+            .on_toggle(Message::SetPipewireEnabled)
+            .size(14)
+            .text_size(12),
         button("Refresh").on_press(Message::Refresh),
     ]
+    .spacing(8)
     .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
     .align_y(iced::alignment::Vertical::Center);
 
@@ -551,11 +570,25 @@ fn view_discord(app: &App) -> Element<'_, Message> {
         .into()
     };
 
+    let discord_enabled = app.config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
+    let enabled_checkbox: Element<Message> = if app.config.discord.is_some() {
+        checkbox("Enabled", discord_enabled)
+            .on_toggle(Message::SetDiscordEnabled)
+            .size(14)
+            .text_size(12)
+            .into()
+    } else {
+        text("Add [discord] to config.toml to enable").size(11)
+            .color(Color::from_rgb8(0x80, 0x80, 0x80))
+            .into()
+    };
     let header = row![
         text("Discord User Settings").size(16),
         iced::widget::Space::with_width(Length::Fill),
+        enabled_checkbox,
         button("+ Manual").on_press(Message::AddDiscordUser),
     ]
+    .spacing(8)
     .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
     .align_y(iced::alignment::Vertical::Center);
 
@@ -627,11 +660,25 @@ fn view_teamspeak(app: &App) -> Element<'_, Message> {
         .into()
     };
 
+    let ts3_enabled = app.config.teamspeak.as_ref().map(|t| t.enabled).unwrap_or(false);
+    let enabled_checkbox: Element<Message> = if app.config.teamspeak.is_some() {
+        checkbox("Enabled", ts3_enabled)
+            .on_toggle(Message::SetTeamspeakEnabled)
+            .size(14)
+            .text_size(12)
+            .into()
+    } else {
+        text("Add [teamspeak] to config.toml to enable").size(11)
+            .color(Color::from_rgb8(0x80, 0x80, 0x80))
+            .into()
+    };
     let header = row![
         text("TeamSpeak User Settings").size(16),
         iced::widget::Space::with_width(Length::Fill),
+        enabled_checkbox,
         button("+ Manual").on_press(Message::AddTs3User),
     ]
+    .spacing(8)
     .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
     .align_y(iced::alignment::Vertical::Center);
 

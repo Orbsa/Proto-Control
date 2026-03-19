@@ -14,11 +14,11 @@ struct RotoTray {
 
 impl ksni::Tray for RotoTray {
     fn id(&self) -> String {
-        "rotocontrol".into()
+        "proto-control".into()
     }
 
     fn title(&self) -> String {
-        "Rotool".into()
+        "Proto-Control".into()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {

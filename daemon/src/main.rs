@@ -66,22 +66,24 @@ fn main() -> Result<()> {
     // 2. Switch to MIDI mode and set setup names
     info!("Switching to MIDI mode...");
     dev.set_mode(protocol::Mode::Midi, 0)?;
-    dev.set_setup_name(0, "Rotool")?;
+    dev.set_setup_name(0, "PipeWire")?;
 
     // 3. Load config and enumerate PipeWire streams
     let mut config = config::Config::load();
-    let streams = pipewire::list_streams(&config)?;
-    let num_assigned = streams.len().min(MAX_CONTROLS);
-    info!("Found {} audio streams, assigning {} to knobs", streams.len(), num_assigned);
-
-    if num_assigned == 0 {
-        warn!("No audio streams found. Play some audio and restart.");
-        return Ok(());
-    }
+    let mut assigned_streams: Vec<pipewire::AudioStream> = if config.pipewire_enabled {
+        let streams = pipewire::list_streams(&config)?;
+        let num_assigned = streams.len().min(MAX_CONTROLS);
+        info!("Found {} audio streams, assigning {} to knobs", streams.len(), num_assigned);
+        streams.into_iter().take(MAX_CONTROLS).collect()
+    } else {
+        info!("PipeWire integration disabled");
+        vec![]
+    };
 
     // 4. Configure page 1 (PipeWire streams)
-    let mut assigned_streams: Vec<pipewire::AudioStream> = streams.into_iter().take(MAX_CONTROLS).collect();
-    apply_stream_config(&mut dev, &assigned_streams, 0)?;
+    if !assigned_streams.is_empty() {
+        apply_stream_config(&mut dev, &assigned_streams, 0)?;
+    }
 
     // 5. Open MIDI connections
     info!("Opening MIDI connections...");
@@ -89,24 +91,36 @@ fn main() -> Result<()> {
     let (_midi_in_conn, midi_rx) = midi::open_input()?;
 
     // 6. Set initial knob positions to match current volumes
-    std::thread::sleep(Duration::from_millis(200));
-    sync_midi_state(&mut midi_out, &assigned_streams)?;
+    if !assigned_streams.is_empty() {
+        std::thread::sleep(Duration::from_millis(200));
+        sync_midi_state(&mut midi_out, &assigned_streams)?;
+    }
 
-    // 7. Start Discord integration on page 2 (if configured)
+    // 7. Start Discord integration on page 2 (if configured and enabled)
     let discord_handle = if let Some(ref dc) = config.discord {
-        dev.set_setup_name(1, "Discord")?;
-        info!("Starting Discord voice integration...");
-        Some(discord::start(dc.client_id.clone(), dc.client_secret.clone()))
+        if dc.enabled {
+            dev.set_setup_name(1, "Discord")?;
+            info!("Starting Discord voice integration...");
+            Some(discord::start(dc.client_id.clone(), dc.client_secret.clone()))
+        } else {
+            info!("Discord integration disabled");
+            None
+        }
     } else {
         None
     };
     let mut discord_members: Vec<discord::VoiceMember> = vec![];
 
-    // 7b. Start TeamSpeak integration on page 3 (if configured)
+    // 7b. Start TeamSpeak integration on page 3 (if configured and enabled)
     let ts3_handle = if let Some(ref ts) = config.teamspeak {
-        dev.set_setup_name(2, "TeamSpeak")?;
-        info!("Starting TeamSpeak voice integration...");
-        Some(teamspeak::start(ts.socket_path.clone()))
+        if ts.enabled {
+            dev.set_setup_name(2, "TeamSpeak")?;
+            info!("Starting TeamSpeak voice integration...");
+            Some(teamspeak::start(ts.socket_path.clone()))
+        } else {
+            info!("TeamSpeak integration disabled");
+            None
+        }
     } else {
         None
     };

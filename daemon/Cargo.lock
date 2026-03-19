@@ -2498,6 +2498,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "proto-control"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "ctrlc",
+ "dirs 6.0.0",
+ "env_logger",
+ "iced",
+ "ksni",
+ "libc",
+ "log",
+ "midir",
+ "png",
+ "serde",
+ "serde_json",
+ "serialport",
+ "toml",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2685,26 +2705,6 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
-
-[[package]]
-name = "rotocontrol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ctrlc",
- "dirs 6.0.0",
- "env_logger",
- "iced",
- "ksni",
- "libc",
- "log",
- "midir",
- "png",
- "serde",
- "serde_json",
- "serialport",
- "toml",
-]
 
 [[package]]
 name = "roxmltree"

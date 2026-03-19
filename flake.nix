@@ -1,5 +1,5 @@
 {
-  description = "rotocontrol - Custom control interface for Melbourne Instruments Roto-Control";
+  description = "proto-control - PipeWire/Discord/TeamSpeak integration daemon for the Melbourne Instruments Roto-Control";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -23,8 +23,8 @@
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "rotocontrol";
-          version = "0.1.0";
+          pname = "proto-control";
+          version = "1.0.0";
           src = ./daemon;
           cargoLock.lockFile = ./daemon/Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];

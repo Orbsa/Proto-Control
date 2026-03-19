@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub streams: Vec<StreamOverride>,
+    #[serde(default = "default_true")]
+    pub pipewire_enabled: bool,
     pub discord: Option<DiscordConfig>,
     pub teamspeak: Option<TeamSpeakConfig>,
     #[serde(default)]
@@ -17,18 +19,37 @@ pub struct Config {
     pub teamspeak_users: Vec<UserOverride>,
 }
 
+fn default_true() -> bool { true }
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            streams: vec![],
+            pipewire_enabled: true,
+            discord: None,
+            teamspeak: None,
+            discord_users: vec![],
+            teamspeak_users: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DiscordConfig {
     pub client_id: String,
     pub client_secret: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TeamSpeakConfig {
     /// Path to the Unix socket created by the TS3 plugin.
-    /// Defaults to /tmp/rotocontrol-ts3.sock
+    /// Auto-detected: checks Flatpak path first, then native ~/.ts3client/.
     #[serde(default = "default_ts3_socket")]
     pub socket_path: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_ts3_socket() -> String {
@@ -70,9 +91,8 @@ struct BuiltinDefault {
 }
 
 const BUILTIN_DEFAULTS: &[BuiltinDefault] = &[
-    BuiltinDefault { binary: "zen", name: "Zen", mpris_player: None, color: None },
-    BuiltinDefault { binary: ".Discord-wrapped", name: "Discord", mpris_player: None, color: Some(62) }, // #2F52A2 blue
-    BuiltinDefault { binary: "tidal-hifi", name: "Tidal", mpris_player: Some("tidal-hifi"), color: None },
+    // Discord on Linux ships as a wrapped Electron app with this binary name.
+    BuiltinDefault { binary: ".Discord-wrapped", name: "Discord", mpris_player: None, color: Some(62) },
 ];
 
 /// Result of resolving a stream's config.
@@ -192,10 +212,10 @@ pub fn query_mpris_title(player: &str) -> Option<String> {
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rotocontrol").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("proto-control").join("config.toml"))
 }
 
 /// Path for runtime state files (e.g. active member lists written by the daemon).
 pub fn state_path(filename: &str) -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rotocontrol").join(filename))
+    dirs::config_dir().map(|d| d.join("proto-control").join(filename))
 }

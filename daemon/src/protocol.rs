@@ -1,4 +1,5 @@
 //! Binary serial protocol for communicating with the Roto-Control device.
+#![allow(dead_code)]
 //!
 //! Commands:  0x5A <group> <subcommand> <len_hi> <len_lo> [data...]
 //! Responses: 0xA5 <status> [data...]
