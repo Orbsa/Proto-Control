@@ -2,8 +2,8 @@ CC      := gcc
 CFLAGS  := -Wall -Wextra -O2 -fPIC -fvisibility=hidden -D_GNU_SOURCE -DBUILDING_DLL
 INC     := -I../acre2/extensions/src/ACRE2TS/inc
 LDFLAGS := -shared -pthread
-OUT     := rotocontrol_ts3_linux_amd64.so
-SRC     := rotocontrol_ts3.c
+OUT     := protocontrol_ts3_linux_amd64.so
+SRC     := protocontrol_ts3.c
 
 .PHONY: all clean install
 
