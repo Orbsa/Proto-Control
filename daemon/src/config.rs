@@ -10,12 +10,25 @@ pub struct Config {
     #[serde(default)]
     pub streams: Vec<StreamOverride>,
     pub discord: Option<DiscordConfig>,
+    pub teamspeak: Option<TeamSpeakConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DiscordConfig {
     pub client_id: String,
     pub client_secret: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TeamSpeakConfig {
+    /// Path to the Unix socket created by the TS3 plugin.
+    /// Defaults to /tmp/rotocontrol-ts3.sock
+    #[serde(default = "default_ts3_socket")]
+    pub socket_path: String,
+}
+
+fn default_ts3_socket() -> String {
+    crate::teamspeak::default_socket_path()
 }
 
 #[derive(Debug, Deserialize)]

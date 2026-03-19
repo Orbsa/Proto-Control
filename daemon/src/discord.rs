@@ -30,6 +30,17 @@ pub struct VoiceMember {
     pub nick: String,
     pub volume: u16,  // 0-200 Discord IPC scale
     pub muted: bool,
+    pub self_muted: bool,    // user muted their own mic
+    pub self_deafened: bool, // user deafened themselves
+}
+
+impl VoiceMember {
+    /// Sort key: 0 = active, 1 = self-muted only, 2 = deafened.
+    pub fn activity_key(&self) -> u8 {
+        if self.self_deafened { 2 }
+        else if self.self_muted { 1 }
+        else { 0 }
+    }
 }
 
 pub enum Command {
@@ -194,16 +205,17 @@ fn run_client(
                         let mut changed = false;
                         if let Some(v) = msg["data"]["volume"].as_f64() {
                             let new_vol = v.round() as u16;
-                            if member.volume != new_vol {
-                                member.volume = new_vol;
-                                changed = true;
-                            }
+                            if member.volume != new_vol { member.volume = new_vol; changed = true; }
                         }
                         if let Some(m) = msg["data"]["mute"].as_bool() {
-                            if member.muted != m {
-                                member.muted = m;
-                                changed = true;
-                            }
+                            if member.muted != m { member.muted = m; changed = true; }
+                        }
+                        let vs = &msg["data"]["voice_state"];
+                        if let Some(sm) = vs["self_mute"].as_bool() {
+                            if member.self_muted != sm { member.self_muted = sm; changed = true; }
+                        }
+                        if let Some(sd) = vs["self_deaf"].as_bool() {
+                            if member.self_deafened != sd { member.self_deafened = sd; changed = true; }
                         }
                         if changed {
                             let _ = members_tx.send(current_members.clone());
@@ -487,8 +499,11 @@ fn parse_voice_member(state: &Value) -> Option<VoiceMember> {
         .to_string();
     let volume = state["volume"].as_f64().unwrap_or(100.0).round() as u16;
     let muted = state["mute"].as_bool().unwrap_or(false);
+    let vs = &state["voice_state"];
+    let self_muted    = vs["self_mute"].as_bool().unwrap_or(false);
+    let self_deafened = vs["self_deaf"].as_bool().unwrap_or(false);
 
-    Some(VoiceMember { user_id, nick, volume, muted })
+    Some(VoiceMember { user_id, nick, volume, muted, self_muted, self_deafened })
 }
 
 // ---- IPC socket discovery ----

@@ -1,27 +1,38 @@
 //! MIDI I/O for communicating knob/button values with the Roto-Control.
 //!
-//! In MIDI mode, the device sends and receives CC messages.
-//! We assign knobs to CC 1-8 and buttons to CC 9-16, all on channel 1.
+//! All setups share MIDI channel 1 (0-indexed: 0) with unique CC ranges:
+//!
+//!   PipeWire:  knobs CC  1-16, buttons CC 17-32
+//!   Discord:   knobs CC 33-48, buttons CC 49-64
+//!   TeamSpeak: knobs CC 65-80, buttons CC 81-96
+//!
+//! 2 pages × 8 controls = 16 per setup, 96 CCs total.
 
 use anyhow::{Context, Result, bail};
-use log::{debug, warn};
+use log::debug;
 use midir::{MidiInput, MidiOutput, MidiOutputConnection, MidiInputConnection};
 use std::sync::mpsc;
 
 pub const MIDI_CHANNEL: u8 = 0; // Channel 1 (0-indexed)
-pub const KNOB_CC_BASE: u8 = 1; // Knobs use CC 1-8
-pub const BUTTON_CC_BASE: u8 = 9; // Buttons use CC 9-16
-pub const DISCORD_KNOB_CC_BASE: u8 = 17; // Discord knobs CC 17-24
-pub const DISCORD_BUTTON_CC_BASE: u8 = 25; // Discord buttons CC 25-32
-pub const NUM_CONTROLS: usize = 8;
+
+pub const KNOB_CC_BASE: u8           = 1;   // PW knobs   CC  1-16
+pub const BUTTON_CC_BASE: u8         = 17;  // PW buttons CC 17-32
+pub const DISCORD_KNOB_CC_BASE: u8   = 33;  // Discord knobs   CC 33-48
+pub const DISCORD_BUTTON_CC_BASE: u8 = 49;  // Discord buttons CC 49-64
+pub const TS3_KNOB_CC_BASE: u8       = 65;  // TS3 knobs   CC 65-80
+pub const TS3_BUTTON_CC_BASE: u8     = 81;  // TS3 buttons CC 81-96
+
+pub const NUM_CONTROLS: usize = 16; // 2 pages × 8 controls per setup
 
 /// Events received from the device.
 #[derive(Debug)]
 pub enum DeviceEvent {
-    KnobTurn { index: usize, value: u8 },
-    ButtonPress { index: usize, value: u8 },
-    DiscordKnobTurn { index: usize, value: u8 },
-    DiscordButtonPress { index: usize, value: u8 },
+    KnobTurn          { index: usize, value: u8 },
+    ButtonPress       { index: usize, value: u8 },
+    DiscordKnobTurn   { index: usize, value: u8 },
+    DiscordButtonPress{ index: usize, value: u8 },
+    Ts3KnobTurn       { index: usize, value: u8 },
+    Ts3ButtonPress    { index: usize, value: u8 },
 }
 
 /// Open the MIDI output connection to the Roto-Control.
@@ -78,31 +89,33 @@ pub fn open_input() -> Result<(MidiInputConnection<()>, mpsc::Receiver<DeviceEve
                     return;
                 }
                 let status = message[0];
-                let cc = message[1];
-                let value = message[2];
+                let cc     = message[1];
+                let value  = message[2];
 
-                // We only care about CC messages on our channel
                 if status != (0xB0 | MIDI_CHANNEL) {
                     return;
                 }
 
-                debug!("MIDI RX: CC {} = {} (ch {})", cc, value, status & 0x0F);
+                debug!("MIDI RX: CC {} = {}", cc, value);
 
-                if cc >= KNOB_CC_BASE && cc < KNOB_CC_BASE + NUM_CONTROLS as u8 {
-                    let index = (cc - KNOB_CC_BASE) as usize;
-                    let _ = tx.send(DeviceEvent::KnobTurn { index, value });
-                } else if cc >= BUTTON_CC_BASE && cc < BUTTON_CC_BASE + NUM_CONTROLS as u8 {
-                    let index = (cc - BUTTON_CC_BASE) as usize;
-                    let _ = tx.send(DeviceEvent::ButtonPress { index, value });
-                } else if cc >= DISCORD_KNOB_CC_BASE && cc < DISCORD_KNOB_CC_BASE + NUM_CONTROLS as u8 {
-                    let index = (cc - DISCORD_KNOB_CC_BASE) as usize;
-                    let _ = tx.send(DeviceEvent::DiscordKnobTurn { index, value });
-                } else if cc >= DISCORD_BUTTON_CC_BASE && cc < DISCORD_BUTTON_CC_BASE + NUM_CONTROLS as u8 {
-                    let index = (cc - DISCORD_BUTTON_CC_BASE) as usize;
-                    let _ = tx.send(DeviceEvent::DiscordButtonPress { index, value });
+                let n = NUM_CONTROLS as u8;
+                let evt = if cc >= KNOB_CC_BASE && cc < KNOB_CC_BASE + n {
+                    DeviceEvent::KnobTurn { index: (cc - KNOB_CC_BASE) as usize, value }
+                } else if cc >= BUTTON_CC_BASE && cc < BUTTON_CC_BASE + n {
+                    DeviceEvent::ButtonPress { index: (cc - BUTTON_CC_BASE) as usize, value }
+                } else if cc >= DISCORD_KNOB_CC_BASE && cc < DISCORD_KNOB_CC_BASE + n {
+                    DeviceEvent::DiscordKnobTurn { index: (cc - DISCORD_KNOB_CC_BASE) as usize, value }
+                } else if cc >= DISCORD_BUTTON_CC_BASE && cc < DISCORD_BUTTON_CC_BASE + n {
+                    DeviceEvent::DiscordButtonPress { index: (cc - DISCORD_BUTTON_CC_BASE) as usize, value }
+                } else if cc >= TS3_KNOB_CC_BASE && cc < TS3_KNOB_CC_BASE + n {
+                    DeviceEvent::Ts3KnobTurn { index: (cc - TS3_KNOB_CC_BASE) as usize, value }
+                } else if cc >= TS3_BUTTON_CC_BASE && cc < TS3_BUTTON_CC_BASE + n {
+                    DeviceEvent::Ts3ButtonPress { index: (cc - TS3_BUTTON_CC_BASE) as usize, value }
                 } else {
                     debug!("MIDI RX: ignoring CC {}", cc);
-                }
+                    return;
+                };
+                let _ = tx.send(evt);
             },
             (),
         )
@@ -111,42 +124,38 @@ pub fn open_input() -> Result<(MidiInputConnection<()>, mpsc::Receiver<DeviceEve
     Ok((conn, rx))
 }
 
-/// Send a CC value to set a knob position (motor will move).
 pub fn send_knob_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
-    if index >= NUM_CONTROLS {
-        bail!("Knob index {} out of range", index);
-    }
-    let msg = [0xB0 | MIDI_CHANNEL, KNOB_CC_BASE + index as u8, value];
-    conn.send(&msg)
+    if index >= NUM_CONTROLS { bail!("Knob index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, KNOB_CC_BASE + index as u8, value])
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }
 
-/// Send a CC value to set a button LED state.
 pub fn send_button_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
-    if index >= NUM_CONTROLS {
-        bail!("Button index {} out of range", index);
-    }
-    let msg = [0xB0 | MIDI_CHANNEL, BUTTON_CC_BASE + index as u8, value];
-    conn.send(&msg)
+    if index >= NUM_CONTROLS { bail!("Button index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, BUTTON_CC_BASE + index as u8, value])
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }
 
-/// Send a CC value to set a Discord knob position.
 pub fn send_discord_knob_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
-    if index >= NUM_CONTROLS {
-        bail!("Discord knob index {} out of range", index);
-    }
-    let msg = [0xB0 | MIDI_CHANNEL, DISCORD_KNOB_CC_BASE + index as u8, value];
-    conn.send(&msg)
+    if index >= NUM_CONTROLS { bail!("Discord knob index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, DISCORD_KNOB_CC_BASE + index as u8, value])
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }
 
-/// Send a CC value to set a Discord button LED state.
 pub fn send_discord_button_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
-    if index >= NUM_CONTROLS {
-        bail!("Discord button index {} out of range", index);
-    }
-    let msg = [0xB0 | MIDI_CHANNEL, DISCORD_BUTTON_CC_BASE + index as u8, value];
-    conn.send(&msg)
+    if index >= NUM_CONTROLS { bail!("Discord button index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, DISCORD_BUTTON_CC_BASE + index as u8, value])
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+pub fn send_ts3_knob_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
+    if index >= NUM_CONTROLS { bail!("TS3 knob index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, TS3_KNOB_CC_BASE + index as u8, value])
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+pub fn send_ts3_button_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
+    if index >= NUM_CONTROLS { bail!("TS3 button index {} out of range", index); }
+    conn.send(&[0xB0 | MIDI_CHANNEL, TS3_BUTTON_CC_BASE + index as u8, value])
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }

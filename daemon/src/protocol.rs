@@ -283,11 +283,17 @@ impl Device {
         Ok(())
     }
 
-    /// Clear all knob and button configs on setup 0 and setup 1 (32 controls each).
-    pub fn clear_all(&mut self) -> Result<()> {
+    /// Clear only the active controls across all setups in a single transaction.
+    /// `setup_counts`: slice of `(setup_index, active_count)` pairs.
+    /// Only controls 0..count are cleared on each setup.
+    pub fn clear_active(&mut self, setup_counts: &[(u8, usize)]) -> Result<()> {
+        let total: usize = setup_counts.iter().map(|(_, c)| *c).sum();
+        if total == 0 {
+            return Ok(());
+        }
         self.start_config_update()?;
-        for setup in 0..2u8 {
-            for i in 0..32u8 {
+        for &(setup, count) in setup_counts {
+            for i in 0..count as u8 {
                 self.send_clear_knob(setup, i)?;
                 self.send_clear_button(setup, i)?;
             }
