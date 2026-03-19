@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 description = "Daemon for the Melbourne Instruments Roto-Control device — PipeWire volume, Discord, and TeamSpeak voice integration"
 license = "MIT"
-repository = "https://github.com/your-org/proto-control"
+repository = "https://github.com/Orbsa/Proto-Control"
 
 [dependencies]
 serialport = "4"
