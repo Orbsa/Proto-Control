@@ -25,13 +25,10 @@
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "proto-control";
           version = "1.0.0";
-          # Merge daemon/ source with the tray icon from the repo root
-          src = pkgs.runCommand "proto-control-src" {} ''
-            cp -r ${./daemon} $out
-            chmod -R u+w $out
-            cp ${./melbourne.png} $out/assets/tray.png
-          '';
+          src = ./daemon;
           cargoLock.lockFile = ./daemon/Cargo.lock;
+          # Copy the tray icon into assets/ before the build runs
+          preConfigure = "cp ${./melbourne.png} assets/tray.png";
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.alsa-lib pkgs.pipewire pkgs.systemdMinimal ] ++ guiLibs;
         };
