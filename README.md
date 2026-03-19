@@ -39,7 +39,7 @@ sudo install -m755 proto-control-*-linux-x86_64 /usr/local/bin/proto-control
 ### NixOS / nix-shell
 
 ```sh
-nix run github:your-org/proto-control
+nix run github:Orbsa/Proto-Control
 ```
 
 Or add to your flake inputs and use `packages.default`.
@@ -209,10 +209,6 @@ systemd.user.services.proto-control = {
   Install.WantedBy = [ "default.target" ];
 };
 ```
-
-## Versioning
-
-The version in `daemon/Cargo.toml` drives releases. Bump it and push to `master` — the CI workflow creates a GitHub Release and uploads binaries automatically when it sees a new version tag.
 
 ## License
 
