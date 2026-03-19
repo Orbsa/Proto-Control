@@ -34,6 +34,11 @@ jobs:
           fi
 
       # ── Nix build (reproducible, for NixOS users) ────────────────────────
+      # Stage tray icon into daemon/assets/ for the build
+      - name: Stage tray icon
+        if: steps.tag_check.outputs.exists == 'false'
+        run: cp melbourne.png daemon/assets/tray.png
+
       - name: Install Nix
         if: steps.tag_check.outputs.exists == 'false'
         uses: DeterminateSystems/nix-installer-action@main

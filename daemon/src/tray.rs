@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const ICON_PNG: &[u8] = include_bytes!("../../melbourne.png");
+#[cfg(has_tray_icon)]
+const ICON_PNG: Option<&[u8]> = Some(include_bytes!("../assets/tray.png"));
+#[cfg(not(has_tray_icon))]
+const ICON_PNG: Option<&[u8]> = None;
 
 struct RotoTray {
     shutdown: Arc<AtomicBool>,
@@ -22,10 +25,10 @@ impl ksni::Tray for RotoTray {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        match decode_png_to_argb32(ICON_PNG) {
-            Some(icon) => vec![icon],
-            None => vec![],
-        }
+        ICON_PNG
+            .and_then(decode_png_to_argb32)
+            .map(|icon| vec![icon])
+            .unwrap_or_default()
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
