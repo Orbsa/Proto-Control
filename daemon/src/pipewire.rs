@@ -12,9 +12,13 @@ use std::thread;
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub id: u32,
-    pub app_name: String,
+    pub binary: String,
+    pub app_id: String,
+    pub raw_name: String,       // PipeWire reported name before any override
+    pub app_name: String,       // resolved display name (after config override)
     pub media_name: Option<String>,
     pub color_scheme: Option<u8>,
+    pub accent_color: Option<u8>,
     pub volume: f64,
     pub muted: bool,
 }
@@ -88,6 +92,13 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
         let app_id = props.portal_app_id.as_deref().unwrap_or("");
         let resolved = config.resolve(binary, app_id, &default_name);
 
+        // Skip ignored streams
+        if resolved.ignored {
+            debug!("Skipping ignored stream: {} (binary={})", default_name, binary);
+            continue;
+        }
+
+        let raw_name = truncate_to_chars(&default_name, 12);
         // Truncate to 12 chars (Roto-Control display limit is 13 with null)
         let app_name = truncate_to_chars(&resolved.name, 12);
 
@@ -105,9 +116,13 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 
         streams.push(AudioStream {
             id: node.id,
+            binary: binary.to_string(),
+            app_id: app_id.to_string(),
+            raw_name,
             app_name,
             media_name,
             color_scheme: resolved.color,
+            accent_color: resolved.accent_color,
             volume,
             muted,
         });

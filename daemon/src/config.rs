@@ -1,25 +1,29 @@
 //! Configuration loading and stream name resolution.
 
 use log::{debug, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub streams: Vec<StreamOverride>,
     pub discord: Option<DiscordConfig>,
     pub teamspeak: Option<TeamSpeakConfig>,
+    #[serde(default)]
+    pub discord_users: Vec<UserOverride>,
+    #[serde(default)]
+    pub teamspeak_users: Vec<UserOverride>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DiscordConfig {
     pub client_id: String,
     pub client_secret: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TeamSpeakConfig {
     /// Path to the Unix socket created by the TS3 plugin.
     /// Defaults to /tmp/rotocontrol-ts3.sock
@@ -31,15 +35,31 @@ fn default_ts3_socket() -> String {
     crate::teamspeak::default_socket_path()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StreamOverride {
     pub binary: Option<String>,
     pub app_id: Option<String>,
     pub name: String,
     /// MPRIS player name for `playerctl` to query current track title.
     pub mpris_player: Option<String>,
-    /// Color scheme index (0-84) for the device display.
+    /// Top/knob color scheme index (0-84).
     pub color: Option<u8>,
+    /// Bottom/button accent color (only visible when media_name is present).
+    pub accent_color: Option<u8>,
+    /// If true, this stream is hidden from the device and daemon.
+    #[serde(default)]
+    pub ignored: bool,
+}
+
+/// Per-user settings for Discord or TeamSpeak.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserOverride {
+    /// Discord username or TeamSpeak nickname.
+    pub name: String,
+    /// Color scheme index (0-84). None = hash-based "random" color.
+    pub color: Option<u8>,
+    /// Sort priority: lower numbers appear first on the device.
+    pub priority: Option<i32>,
 }
 
 struct BuiltinDefault {
@@ -55,11 +75,13 @@ const BUILTIN_DEFAULTS: &[BuiltinDefault] = &[
     BuiltinDefault { binary: "tidal-hifi", name: "Tidal", mpris_player: Some("tidal-hifi"), color: None },
 ];
 
-/// Result of resolving a stream's config: display name + optional MPRIS player + color.
+/// Result of resolving a stream's config.
 pub struct ResolvedStream {
     pub name: String,
     pub mpris_player: Option<String>,
     pub color: Option<u8>,
+    pub accent_color: Option<u8>,
+    pub ignored: bool,
 }
 
 impl Config {
@@ -89,6 +111,18 @@ impl Config {
         }
     }
 
+    /// Save config to `~/.config/rotocontrol/config.toml`.
+    pub fn save(&self) -> Result<(), String> {
+        let path = config_path().ok_or_else(|| "Cannot determine config path".to_string())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let toml = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(&path, toml).map_err(|e| e.to_string())?;
+        debug!("Saved config to {}", path.display());
+        Ok(())
+    }
+
     /// Resolve stream display name and MPRIS player from binary/app_id.
     /// Priority: config file entries > built-in defaults > fallback.
     pub fn resolve(&self, binary: &str, app_id: &str, default: &str) -> ResolvedStream {
@@ -101,6 +135,8 @@ impl Config {
                     name: entry.name.clone(),
                     mpris_player: entry.mpris_player.clone(),
                     color: entry.color,
+                    accent_color: entry.accent_color,
+                    ignored: entry.ignored,
                 };
             }
         }
@@ -112,6 +148,8 @@ impl Config {
                     name: d.name.to_string(),
                     mpris_player: d.mpris_player.map(String::from),
                     color: d.color,
+                    accent_color: None,
+                    ignored: false,
                 };
             }
         }
@@ -120,7 +158,21 @@ impl Config {
             name: default.to_string(),
             mpris_player: None,
             color: None,
+            accent_color: None,
+            ignored: false,
         }
+    }
+
+    /// Look up a saved user override by name (case-insensitive prefix match).
+    pub fn discord_user(&self, name: &str) -> Option<&UserOverride> {
+        let lower = name.to_lowercase();
+        self.discord_users.iter().find(|u| u.name.to_lowercase() == lower)
+    }
+
+    /// Look up a saved TS3 user override by name (case-insensitive prefix match).
+    pub fn ts3_user(&self, name: &str) -> Option<&UserOverride> {
+        let lower = name.to_lowercase();
+        self.teamspeak_users.iter().find(|u| u.name.to_lowercase() == lower)
     }
 }
 
@@ -139,6 +191,11 @@ pub fn query_mpris_title(player: &str) -> Option<String> {
     if title.is_empty() { None } else { Some(title) }
 }
 
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("rotocontrol").join("config.toml"))
+}
+
+/// Path for runtime state files (e.g. active member lists written by the daemon).
+pub fn state_path(filename: &str) -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("rotocontrol").join(filename))
 }

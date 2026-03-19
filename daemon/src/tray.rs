@@ -32,6 +32,29 @@ impl ksni::Tray for RotoTray {
         let shutdown = self.shutdown.clone();
         vec![
             ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label: "Settings".into(),
+                activate: Box::new(|_tray: &mut Self| {
+                    // Fork the current process; child runs the settings GUI.
+                    // This inherits the full environment (LD_LIBRARY_PATH, DISPLAY, etc.)
+                    // without needing to locate the binary in PATH.
+                    let pid = unsafe { libc::fork() };
+                    match pid {
+                        0 => {
+                            // Child: open the settings window then exit.
+                            let _ = crate::gui::run();
+                            unsafe { libc::exit(0) };
+                        }
+                        p if p > 0 => {
+                            // Parent: let child run freely (it will be reaped by init
+                            // once the GUI window closes).
+                        }
+                        _ => warn!("fork() failed for settings GUI"),
+                    }
+                }),
+                ..Default::default()
+            }),
+            ksni::MenuItem::Separator,
+            ksni::MenuItem::Standard(ksni::menu::StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(move |_tray: &mut Self| {
                     shutdown.store(true, Ordering::SeqCst);

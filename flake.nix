@@ -10,6 +10,16 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+
+        # Libraries needed for iced GUI (winit + tiny-skia, both X11 and Wayland)
+        guiLibs = with pkgs; [
+          wayland
+          libxkbcommon
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXrandr
+          xorg.libXi
+        ];
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
@@ -18,7 +28,7 @@
           src = ./daemon;
           cargoLock.lockFile = ./daemon/Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.alsa-lib pkgs.pipewire pkgs.systemdMinimal ];
+          buildInputs = [ pkgs.alsa-lib pkgs.pipewire pkgs.systemdMinimal ] ++ guiLibs;
         };
 
         devShells.default = pkgs.mkShell {
@@ -34,7 +44,11 @@
             pkgs.alsa-lib
             pkgs.pipewire
             pkgs.systemdMinimal
-          ];
+          ] ++ guiLibs;
+
+          # winit/wgpu need these in LD_LIBRARY_PATH on NixOS
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath guiLibs;
+
           RUST_LOG = "debug";
         };
       });
