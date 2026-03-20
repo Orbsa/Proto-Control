@@ -32,6 +32,8 @@ pub struct VoiceMember {
     pub muted: bool,
     pub self_muted: bool,    // user muted their own mic
     pub self_deafened: bool, // user deafened themselves
+    pub streaming: bool,     // user is Go Live streaming
+    pub game_name: Option<String>, // activity / game name if available
 }
 
 impl VoiceMember {
@@ -216,6 +218,16 @@ fn run_client(
                         }
                         if let Some(sd) = vs["self_deaf"].as_bool() {
                             if member.self_deafened != sd { member.self_deafened = sd; changed = true; }
+                        }
+                        if let Some(ss) = vs["self_stream"].as_bool() {
+                            if member.streaming != ss { member.streaming = ss; changed = true; }
+                        }
+                        // Re-parse game name from updated state
+                        if let Some(updated) = parse_voice_member(&msg["data"]) {
+                            if member.game_name != updated.game_name {
+                                member.game_name = updated.game_name;
+                                changed = true;
+                            }
                         }
                         if changed {
                             let _ = members_tx.send(current_members.clone());
@@ -502,8 +514,26 @@ fn parse_voice_member(state: &Value) -> Option<VoiceMember> {
     let vs = &state["voice_state"];
     let self_muted    = vs["self_mute"].as_bool().unwrap_or(false);
     let self_deafened = vs["self_deaf"].as_bool().unwrap_or(false);
+    let streaming     = vs["self_stream"].as_bool().unwrap_or(false);
 
-    Some(VoiceMember { user_id, nick, volume, muted, self_muted, self_deafened })
+    // Try to extract game/activity name from various locations Discord RPC may provide it
+    let game_name = state["activity"]["name"].as_str()
+        .or_else(|| state["game"]["name"].as_str())
+        .or_else(|| {
+            // activities array — pick first non-custom-status entry
+            state["activities"].as_array().and_then(|acts| {
+                acts.iter()
+                    .filter(|a| a["type"].as_u64() != Some(4)) // skip Custom Status
+                    .find_map(|a| a["name"].as_str())
+            })
+        })
+        .map(String::from);
+
+    if streaming {
+        debug!("Streaming member {}: game={:?}, full state: {}", nick, game_name, state);
+    }
+
+    Some(VoiceMember { user_id, nick, volume, muted, self_muted, self_deafened, streaming, game_name })
 }
 
 // ---- IPC socket discovery ----

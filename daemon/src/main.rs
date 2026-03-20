@@ -338,8 +338,10 @@ fn main() -> Result<()> {
                 // Within each tier, honour saved priority (lower = first).
                 members.sort_by(|a, b| {
                     a.activity_key().cmp(&b.activity_key()).then_with(|| {
-                        let pa = config.discord_user(&a.nick).and_then(|u| u.priority).unwrap_or(100);
-                        let pb = config.discord_user(&b.nick).and_then(|u| u.priority).unwrap_or(100);
+                        let default_a = if a.streaming { 50 } else { 100 };
+                        let default_b = if b.streaming { 50 } else { 100 };
+                        let pa = config.discord_user(&a.nick).and_then(|u| u.priority).unwrap_or(default_a);
+                        let pb = config.discord_user(&b.nick).and_then(|u| u.priority).unwrap_or(default_b);
                         pa.cmp(&pb)
                     })
                 });
@@ -347,14 +349,21 @@ fn main() -> Result<()> {
                 let old_ids: Vec<&str> = discord_members.iter().map(|m| m.user_id.as_str()).collect();
                 let new_ids: Vec<&str> = fresh.iter().map(|m| m.user_id.as_str()).collect();
 
-                if old_ids != new_ids {
+                // Detect display-relevant changes: member list, streaming status, or game name
+                let display_changed = old_ids != new_ids || fresh.iter().zip(discord_members.iter()).any(|(n, o)| {
+                    n.streaming != o.streaming || n.game_name != o.game_name
+                });
+
+                if display_changed {
                     let prev_len = discord_members.len();
                     info!("Discord members changed: {} -> {} members", prev_len, fresh.len());
                     if let Err(e) = apply_discord_config(&mut dev, &fresh, prev_len, &config) {
                         warn!("Failed to configure Discord page: {}", e);
                     }
-                    if let Err(e) = sync_discord_midi_state(&mut midi_out, &fresh) {
-                        warn!("Failed to sync Discord MIDI state: {}", e);
+                    if old_ids != new_ids {
+                        if let Err(e) = sync_discord_midi_state(&mut midi_out, &fresh) {
+                            warn!("Failed to sync Discord MIDI state: {}", e);
+                        }
                     }
                 }
                 discord_members = fresh;
@@ -624,6 +633,14 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
             step_names: vec!["".to_string(); 16],
         })?;
 
+        // Show game name on button for streaming members, blank otherwise
+        let (btn_name, btn_color) = if member.streaming {
+            let name = member.game_name.as_deref().unwrap_or("Streaming").to_string();
+            (name, color) // match knob color
+        } else {
+            (String::new(), 70) // black/unlit
+        };
+
         dev.send_midi_button_config(&protocol::MidiButtonConfig {
             setup_index: 1,
             control_index: i as u8,
@@ -633,8 +650,8 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
             nrpn_address: 0xFFFF,
             min_value: 0,
             max_value: 127,
-            control_name: String::new(),
-            color_scheme: 70, // black/unlit
+            control_name: btn_name,
+            color_scheme: btn_color,
             led_on_color: 14,
             led_off_color: 70,
             haptic_mode: protocol::SwitchHapticMode::Toggle,

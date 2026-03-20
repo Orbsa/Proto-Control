@@ -203,12 +203,14 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
         } else if !stream.app_id.is_empty() {
             stream.app_id.clone()
         } else {
-            continue;
+            stream.raw_name.clone()
         };
+        if key.is_empty() { continue; }
         if !seen.insert(key.clone()) { continue; }
 
         let ov = config.streams.iter().find(|o| {
             o.binary.as_deref() == Some(&key) || o.app_id.as_deref() == Some(&key)
+                || o.name == key
         });
         // mpris_player: prefer user config, fall back to built-in default
         let resolved = config.resolve(&stream.binary, &stream.app_id, &stream.raw_name);
@@ -230,7 +232,10 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
 
     // Saved overrides for apps not currently running
     for ov in &config.streams {
-        let key = ov.binary.as_deref().or(ov.app_id.as_deref()).unwrap_or("").to_string();
+        let key = ov.binary.as_deref()
+            .or(ov.app_id.as_deref())
+            .unwrap_or(&ov.name)
+            .to_string();
         if key.is_empty() || seen.contains(&key) { continue; }
         rows.push(StreamRow {
             binary: ov.binary.clone().unwrap_or_default(),
@@ -448,7 +453,9 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
 }
 
 fn stream_card(i: usize, stream: &StreamRow) -> Element<'_, Message> {
-    let key = if !stream.binary.is_empty() { &stream.binary } else { &stream.app_id };
+    let key = if !stream.binary.is_empty() { &stream.binary }
+        else if !stream.app_id.is_empty() { &stream.app_id }
+        else { &stream.raw_name };
     let (status_label, status_color) = if stream.is_live {
         ("live", Color::from_rgb8(0x4C, 0xAF, 0x50))
     } else {
