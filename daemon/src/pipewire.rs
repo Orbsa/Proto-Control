@@ -15,8 +15,8 @@ pub struct AudioStream {
     pub pid: Option<u32>,
     pub binary: String,
     pub app_id: String,
-    pub raw_name: String,       // PipeWire reported name before any override
-    pub app_name: String,       // resolved display name (after config override)
+    pub raw_name: String, // PipeWire reported name before any override
+    pub app_name: String, // resolved display name (after config override)
     pub media_name: Option<String>,
     pub color_scheme: Option<u8>,
     pub accent_color: Option<u8>,
@@ -60,11 +60,14 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
         .context("Failed to run pw-dump. Is PipeWire running?")?;
 
     if !output.status.success() {
-        bail!("pw-dump failed: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "pw-dump failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    let nodes: Vec<PwNode> = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse pw-dump output")?;
+    let nodes: Vec<PwNode> =
+        serde_json::from_slice(&output.stdout).context("Failed to parse pw-dump output")?;
 
     let mut streams = Vec::new();
 
@@ -86,7 +89,8 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
             continue;
         }
 
-        let default_name = props.application_name
+        let default_name = props
+            .application_name
             .clone()
             .or_else(|| props.node_name.clone())
             .unwrap_or_else(|| format!("Stream {}", node.id));
@@ -98,7 +102,10 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 
         // Skip ignored streams
         if resolved.ignored {
-            debug!("Skipping ignored stream: {} (binary={})", default_name, binary);
+            debug!(
+                "Skipping ignored stream: {} (binary={})",
+                default_name, binary
+            );
             continue;
         }
 
@@ -107,10 +114,14 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
         let app_name = truncate_to_chars(&resolved.name, 12);
 
         // Get media_name: prefer MPRIS title if configured, otherwise PipeWire media.name
-        let media_name = resolved.mpris_player.as_deref()
+        let media_name = resolved
+            .mpris_player
+            .as_deref()
             .and_then(crate::config::query_mpris_title)
             .or_else(|| {
-                props.media_name.as_deref()
+                props
+                    .media_name
+                    .as_deref()
                     .filter(|m| !is_generic_media_name(m, &app_name))
                     .map(String::from)
             })
@@ -237,7 +248,10 @@ pub fn watch_changes() -> mpsc::Receiver<()> {
 
                 match child {
                     Err(e) => {
-                        warn!("Failed to spawn pactl subscribe: {}. Falling back to polling.", e);
+                        warn!(
+                            "Failed to spawn pactl subscribe: {}. Falling back to polling.",
+                            e
+                        );
                         return;
                     }
                     Ok(mut child) => {

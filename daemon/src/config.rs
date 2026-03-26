@@ -19,7 +19,9 @@ pub struct Config {
     pub teamspeak_users: Vec<UserOverride>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -96,7 +98,12 @@ struct BuiltinDefault {
 
 const BUILTIN_DEFAULTS: &[BuiltinDefault] = &[
     // Discord on Linux ships as a wrapped Electron app with this binary name.
-    BuiltinDefault { binary: ".Discord-wrapped", name: "Discord", mpris_player: None, color: Some(62) },
+    BuiltinDefault {
+        binary: ".Discord-wrapped",
+        name: "Discord",
+        mpris_player: None,
+        color: Some(62),
+    },
 ];
 
 /// Result of resolving a stream's config.
@@ -194,13 +201,17 @@ impl Config {
     /// Look up a saved user override by name (case-insensitive prefix match).
     pub fn discord_user(&self, name: &str) -> Option<&UserOverride> {
         let lower = name.to_lowercase();
-        self.discord_users.iter().find(|u| u.name.to_lowercase() == lower)
+        self.discord_users
+            .iter()
+            .find(|u| u.name.to_lowercase() == lower)
     }
 
     /// Look up a saved TS3 user override by name (case-insensitive prefix match).
     pub fn ts3_user(&self, name: &str) -> Option<&UserOverride> {
         let lower = name.to_lowercase();
-        self.teamspeak_users.iter().find(|u| u.name.to_lowercase() == lower)
+        self.teamspeak_users
+            .iter()
+            .find(|u| u.name.to_lowercase() == lower)
     }
 }
 

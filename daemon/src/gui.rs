@@ -7,50 +7,65 @@ use crate::config::{self, Config, StreamOverride, UserOverride};
 use crate::pipewire;
 
 use iced::{
-    widget::{
-        button, checkbox, column, container, horizontal_rule, pick_list, row, scrollable, text,
-        text_input, Column, Row,
-    },
     Color, Element, Length, Padding, Task, Theme,
+    widget::{
+        Column, Row, button, checkbox, column, container, horizontal_rule, pick_list, row,
+        scrollable, text, text_input,
+    },
 };
 
 // ---- Colour palette -------------------------------------------------------
 
 /// (device_index, RGB) – matches COLOR_POOL in main.rs.
 const PALETTE: &[(Option<u8>, (u8, u8, u8))] = &[
-    (None,     (0x50, 0x50, 0x50)), // Random (grey placeholder)
-    (Some(0),  (0xFF, 0x94, 0xA6)), // Pink
-    (Some(1),  (0xFF, 0xA5, 0x29)), // Orange
-    (Some(3),  (0xF7, 0xF4, 0x7C)), // Yellow
-    (Some(5),  (0x1A, 0xFF, 0x2F)), // Green
-    (Some(7),  (0x5C, 0xFF, 0xE8)), // Teal
-    (Some(9),  (0x54, 0x80, 0xE4)), // Blue
+    (None, (0x50, 0x50, 0x50)),     // Random (grey placeholder)
+    (Some(0), (0xFF, 0x94, 0xA6)),  // Pink
+    (Some(1), (0xFF, 0xA5, 0x29)),  // Orange
+    (Some(3), (0xF7, 0xF4, 0x7C)),  // Yellow
+    (Some(5), (0x1A, 0xFF, 0x2F)),  // Green
+    (Some(7), (0x5C, 0xFF, 0xE8)),  // Teal
+    (Some(9), (0x54, 0x80, 0xE4)),  // Blue
     (Some(11), (0xD8, 0x6C, 0xE4)), // Purple
     (Some(14), (0xFF, 0x36, 0x36)), // Red
 ];
 
 fn palette_color(idx: Option<u8>) -> Color {
-    let &(_, (r, g, b)) = PALETTE.iter().find(|(i, _)| *i == idx).unwrap_or(&PALETTE[0]);
+    let &(_, (r, g, b)) = PALETTE
+        .iter()
+        .find(|(i, _)| *i == idx)
+        .unwrap_or(&PALETTE[0]);
     Color::from_rgb8(r, g, b)
 }
 
 /// A small coloured square button. White border = selected.
 fn swatch<'a>(idx: Option<u8>, selected: bool, msg: Message) -> Element<'a, Message> {
     let bg = palette_color(idx);
-    let border_col = if selected { Color::WHITE } else { Color::from_rgb8(0x28, 0x28, 0x28) };
-    let border_w   = if selected { 2.0_f32 } else { 1.0 };
+    let border_col = if selected {
+        Color::WHITE
+    } else {
+        Color::from_rgb8(0x28, 0x28, 0x28)
+    };
+    let border_w = if selected { 2.0_f32 } else { 1.0 };
     let label = if idx.is_none() { "?" } else { "" };
-    button(text(label).size(10).color(Color::from_rgb8(0x10, 0x10, 0x10)))
-        .style(move |_theme: &Theme, _| button::Style {
-            background: Some(iced::Background::Color(bg)),
-            border: iced::Border { color: border_col, width: border_w, radius: 3.0.into() },
-            text_color: Color::from_rgb8(0x10, 0x10, 0x10),
-            shadow: iced::Shadow::default(),
-        })
-        .width(22)
-        .height(22)
-        .on_press(msg)
-        .into()
+    button(
+        text(label)
+            .size(10)
+            .color(Color::from_rgb8(0x10, 0x10, 0x10)),
+    )
+    .style(move |_theme: &Theme, _| button::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border {
+            color: border_col,
+            width: border_w,
+            radius: 3.0.into(),
+        },
+        text_color: Color::from_rgb8(0x10, 0x10, 0x10),
+        shadow: iced::Shadow::default(),
+    })
+    .width(22)
+    .height(22)
+    .on_press(msg)
+    .into()
 }
 
 /// A row of colour swatches (Random + 8 named colours).
@@ -58,7 +73,8 @@ fn color_picker_row<'a, F>(selected: Option<u8>, make: F) -> Element<'a, Message
 where
     F: Fn(Option<u8>) -> Message + 'a,
 {
-    let swatches: Vec<Element<Message>> = PALETTE.iter()
+    let swatches: Vec<Element<Message>> = PALETTE
+        .iter()
         .map(|(idx, _)| swatch(*idx, selected == *idx, make(*idx)))
         .collect();
     Row::with_children(swatches).spacing(3).into()
@@ -67,7 +83,11 @@ where
 // ---- State ----------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
-enum Tab { PipeWire, Discord, TeamSpeak }
+enum Tab {
+    PipeWire,
+    Discord,
+    TeamSpeak,
+}
 
 #[derive(Clone, Debug)]
 struct StreamRow {
@@ -100,7 +120,13 @@ struct UserRow {
     priority_input: String,
 }
 impl UserRow {
-    fn empty() -> Self { UserRow { name_input: String::new(), color: None, priority_input: String::new() } }
+    fn empty() -> Self {
+        UserRow {
+            name_input: String::new(),
+            color: None,
+            priority_input: String::new(),
+        }
+    }
     fn from_override(ov: &UserOverride) -> Self {
         UserRow {
             name_input: ov.name.clone(),
@@ -180,25 +206,36 @@ fn init() -> (App, Task<Message>) {
     let config = Config::load();
     let pw_streams = pipewire::list_streams(&config).unwrap_or_default();
     let streams = build_stream_rows(&config, &pw_streams);
-    let discord_users = config.discord_users.iter().map(UserRow::from_override).collect();
-    let ts3_users = config.teamspeak_users.iter().map(UserRow::from_override).collect();
+    let discord_users = config
+        .discord_users
+        .iter()
+        .map(UserRow::from_override)
+        .collect();
+    let ts3_users = config
+        .teamspeak_users
+        .iter()
+        .map(UserRow::from_override)
+        .collect();
     let discord_active = read_member_state("discord_members.json");
     let ts3_active = read_member_state("ts3_members.json");
 
-    (App {
-        tab: Tab::PipeWire,
-        config,
-        streams,
-        discord_users,
-        ts3_users,
-        discord_active,
-        ts3_active,
-        discord_add_sel: None,
-        ts3_add_sel: None,
-        status: String::new(),
-        hide_offline: false,
-        expanded_streams: std::collections::HashSet::new(),
-    }, Task::none())
+    (
+        App {
+            tab: Tab::PipeWire,
+            config,
+            streams,
+            discord_users,
+            ts3_users,
+            discord_active,
+            ts3_active,
+            discord_add_sel: None,
+            ts3_add_sel: None,
+            status: String::new(),
+            hide_offline: false,
+            expanded_streams: std::collections::HashSet::new(),
+        },
+        Task::none(),
+    )
 }
 
 fn read_member_state(filename: &str) -> Vec<String> {
@@ -228,8 +265,12 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
 
     for stream in pw_streams {
         let dedup_key = format!("{}:{}", stream.binary, stream.raw_name);
-        if dedup_key == ":" { continue; }
-        if !seen.insert(dedup_key) { continue; }
+        if dedup_key == ":" {
+            continue;
+        }
+        if !seen.insert(dedup_key) {
+            continue;
+        }
 
         let config_key = if !stream.binary.is_empty() {
             &stream.binary
@@ -240,17 +281,22 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
         };
 
         let ov = config.streams.iter().find(|o| {
-            o.binary.as_deref() == Some(config_key) || o.app_id.as_deref() == Some(config_key)
+            o.binary.as_deref() == Some(config_key)
+                || o.app_id.as_deref() == Some(config_key)
                 || o.name == *config_key
         });
         // mpris_player: prefer user config, fall back to built-in default
         let resolved = config.resolve(&stream.binary, &stream.app_id, &stream.raw_name);
-        let mpris_player = ov.and_then(|o| o.mpris_player.clone()).or(resolved.mpris_player);
+        let mpris_player = ov
+            .and_then(|o| o.mpris_player.clone())
+            .or(resolved.mpris_player);
         rows.push(StreamRow {
             binary: stream.binary.clone(),
             app_id: stream.app_id.clone(),
             raw_name: stream.raw_name.clone(),
-            name_input: ov.map(|o| o.name.clone()).unwrap_or_else(|| stream.raw_name.clone()),
+            name_input: ov
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| stream.raw_name.clone()),
             color: ov.and_then(|o| o.color),
             accent_color: ov.and_then(|o| o.accent_color),
             ignored: ov.map(|o| o.ignored).unwrap_or(false),
@@ -265,15 +311,18 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
     }
 
     // Saved overrides for apps not currently running
-    let seen_keys: std::collections::HashSet<String> = rows.iter()
-        .map(|r| stream_row_key(r))
-        .collect();
+    let seen_keys: std::collections::HashSet<String> =
+        rows.iter().map(|r| stream_row_key(r)).collect();
     for ov in &config.streams {
-        let key = ov.binary.as_deref()
+        let key = ov
+            .binary
+            .as_deref()
             .or(ov.app_id.as_deref())
             .unwrap_or(&ov.name)
             .to_string();
-        if key.is_empty() || seen_keys.contains(&key) { continue; }
+        if key.is_empty() || seen_keys.contains(&key) {
+            continue;
+        }
         rows.push(StreamRow {
             binary: ov.binary.clone().unwrap_or_default(),
             app_id: ov.app_id.clone().unwrap_or_default(),
@@ -295,10 +344,13 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
     // Detect sub-streams: streams sharing a PID or with a parent/child PID
     // relationship are grouped. The first stream seen for a PID is the "parent".
     // Build PID -> first row key mapping.
-    let mut pid_to_parent_key: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut pid_to_parent_key: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
     for row in &rows {
         if let Some(pid) = row.pid {
-            pid_to_parent_key.entry(pid).or_insert_with(|| stream_row_key(row));
+            pid_to_parent_key
+                .entry(pid)
+                .or_insert_with(|| stream_row_key(row));
         }
     }
 
@@ -314,7 +366,9 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
             }
             // Process ancestry: check if our PID is a child of another stream's PID
             for (&other_pid, parent_key) in &pid_to_parent_key {
-                if other_pid == pid { continue; }
+                if other_pid == pid {
+                    continue;
+                }
                 if pipewire::is_descendant(pid, other_pid) {
                     row.parent_key = Some(parent_key.clone());
                     break;
@@ -330,22 +384,54 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
 
 fn update(app: &mut App, msg: Message) -> Task<Message> {
     match msg {
-        Message::TabSelected(t) => { app.tab = t; }
+        Message::TabSelected(t) => {
+            app.tab = t;
+        }
 
         // PipeWire
-        Message::SetHideOffline(v) => { app.hide_offline = v; }
-        Message::StreamNameChanged(i, s) => { if let Some(r) = app.streams.get_mut(i) { r.name_input = s; } }
-        Message::StreamColorSelected(i, c) => { if let Some(r) = app.streams.get_mut(i) { r.color = c; } }
-        Message::StreamAccentColorSelected(i, c) => { if let Some(r) = app.streams.get_mut(i) { r.accent_color = c; } }
-        Message::StreamIgnoreToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.ignored = v; } }
-        Message::StreamMprisToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.use_mpris = v; } }
-        Message::StreamAutoLinkToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.auto_link_children = v; } }
+        Message::SetHideOffline(v) => {
+            app.hide_offline = v;
+        }
+        Message::StreamNameChanged(i, s) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.name_input = s;
+            }
+        }
+        Message::StreamColorSelected(i, c) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.color = c;
+            }
+        }
+        Message::StreamAccentColorSelected(i, c) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.accent_color = c;
+            }
+        }
+        Message::StreamIgnoreToggled(i, v) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.ignored = v;
+            }
+        }
+        Message::StreamMprisToggled(i, v) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.use_mpris = v;
+            }
+        }
+        Message::StreamAutoLinkToggled(i, v) => {
+            if let Some(r) = app.streams.get_mut(i) {
+                r.auto_link_children = v;
+            }
+        }
         Message::ToggleStreamExpand(key) => {
             if !app.expanded_streams.remove(&key) {
                 app.expanded_streams.insert(key);
             }
         }
-        Message::RemoveStream(i) => { if i < app.streams.len() { app.streams.remove(i); } }
+        Message::RemoveStream(i) => {
+            if i < app.streams.len() {
+                app.streams.remove(i);
+            }
+        }
         Message::Refresh => {
             let pw = pipewire::list_streams(&app.config).unwrap_or_default();
             app.streams = build_stream_rows(&app.config, &pw);
@@ -355,8 +441,12 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
         }
 
         // Discord
-        Message::AddDiscordUser => { app.discord_users.push(UserRow::empty()); }
-        Message::DiscordActiveUserSelected(s) => { app.discord_add_sel = Some(s); }
+        Message::AddDiscordUser => {
+            app.discord_users.push(UserRow::empty());
+        }
+        Message::DiscordActiveUserSelected(s) => {
+            app.discord_add_sel = Some(s);
+        }
         Message::AddDiscordUserFromActive => {
             if let Some(nick) = app.discord_add_sel.take() {
                 if !app.discord_users.iter().any(|r| r.name_input == nick) {
@@ -366,14 +456,34 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                 }
             }
         }
-        Message::DiscordUserNameChanged(i, s) => { if let Some(r) = app.discord_users.get_mut(i) { r.name_input = s; } }
-        Message::DiscordUserColorSelected(i, c) => { if let Some(r) = app.discord_users.get_mut(i) { r.color = c; } }
-        Message::DiscordUserPriorityChanged(i, s) => { if let Some(r) = app.discord_users.get_mut(i) { r.priority_input = s; } }
-        Message::RemoveDiscordUser(i) => { if i < app.discord_users.len() { app.discord_users.remove(i); } }
+        Message::DiscordUserNameChanged(i, s) => {
+            if let Some(r) = app.discord_users.get_mut(i) {
+                r.name_input = s;
+            }
+        }
+        Message::DiscordUserColorSelected(i, c) => {
+            if let Some(r) = app.discord_users.get_mut(i) {
+                r.color = c;
+            }
+        }
+        Message::DiscordUserPriorityChanged(i, s) => {
+            if let Some(r) = app.discord_users.get_mut(i) {
+                r.priority_input = s;
+            }
+        }
+        Message::RemoveDiscordUser(i) => {
+            if i < app.discord_users.len() {
+                app.discord_users.remove(i);
+            }
+        }
 
         // TS3
-        Message::AddTs3User => { app.ts3_users.push(UserRow::empty()); }
-        Message::Ts3ActiveUserSelected(s) => { app.ts3_add_sel = Some(s); }
+        Message::AddTs3User => {
+            app.ts3_users.push(UserRow::empty());
+        }
+        Message::Ts3ActiveUserSelected(s) => {
+            app.ts3_add_sel = Some(s);
+        }
         Message::AddTs3UserFromActive => {
             if let Some(nick) = app.ts3_add_sel.take() {
                 if !app.ts3_users.iter().any(|r| r.name_input == nick) {
@@ -383,18 +493,40 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                 }
             }
         }
-        Message::Ts3UserNameChanged(i, s) => { if let Some(r) = app.ts3_users.get_mut(i) { r.name_input = s; } }
-        Message::Ts3UserColorSelected(i, c) => { if let Some(r) = app.ts3_users.get_mut(i) { r.color = c; } }
-        Message::Ts3UserPriorityChanged(i, s) => { if let Some(r) = app.ts3_users.get_mut(i) { r.priority_input = s; } }
-        Message::RemoveTs3User(i) => { if i < app.ts3_users.len() { app.ts3_users.remove(i); } }
+        Message::Ts3UserNameChanged(i, s) => {
+            if let Some(r) = app.ts3_users.get_mut(i) {
+                r.name_input = s;
+            }
+        }
+        Message::Ts3UserColorSelected(i, c) => {
+            if let Some(r) = app.ts3_users.get_mut(i) {
+                r.color = c;
+            }
+        }
+        Message::Ts3UserPriorityChanged(i, s) => {
+            if let Some(r) = app.ts3_users.get_mut(i) {
+                r.priority_input = s;
+            }
+        }
+        Message::RemoveTs3User(i) => {
+            if i < app.ts3_users.len() {
+                app.ts3_users.remove(i);
+            }
+        }
 
         // Enable toggles
-        Message::SetPipewireEnabled(v) => { app.config.pipewire_enabled = v; }
+        Message::SetPipewireEnabled(v) => {
+            app.config.pipewire_enabled = v;
+        }
         Message::SetDiscordEnabled(v) => {
-            if let Some(ref mut dc) = app.config.discord { dc.enabled = v; }
+            if let Some(ref mut dc) = app.config.discord {
+                dc.enabled = v;
+            }
         }
         Message::SetTeamspeakEnabled(v) => {
-            if let Some(ref mut ts) = app.config.teamspeak { ts.enabled = v; }
+            if let Some(ref mut ts) = app.config.teamspeak {
+                ts.enabled = v;
+            }
         }
 
         // Save
@@ -408,15 +540,28 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                     || row.ignored
                     || row.use_mpris
                     || row.auto_link_children;
-                if !has_override { continue; }
+                if !has_override {
+                    continue;
+                }
 
-                let binary = if row.binary.is_empty() { None } else { Some(row.binary.clone()) };
-                let app_id = if row.app_id.is_empty() { None } else { Some(row.app_id.clone()) };
+                let binary = if row.binary.is_empty() {
+                    None
+                } else {
+                    Some(row.binary.clone())
+                };
+                let app_id = if row.app_id.is_empty() {
+                    None
+                } else {
+                    Some(row.app_id.clone())
+                };
                 // When use_mpris is set: keep custom mpris_player name if present,
                 // otherwise default to binary name (works for most playerctl players).
                 let mpris_player = if row.use_mpris {
-                    Some(row.mpris_player.clone()
-                        .unwrap_or_else(|| row.binary.clone()))
+                    Some(
+                        row.mpris_player
+                            .clone()
+                            .unwrap_or_else(|| row.binary.clone()),
+                    )
                 } else {
                     None
                 };
@@ -433,7 +578,9 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                 });
             }
 
-            app.config.discord_users = app.discord_users.iter()
+            app.config.discord_users = app
+                .discord_users
+                .iter()
                 .filter(|r| !r.name_input.trim().is_empty())
                 .map(|r| UserOverride {
                     name: r.name_input.trim().to_string(),
@@ -442,7 +589,9 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                 })
                 .collect();
 
-            app.config.teamspeak_users = app.ts3_users.iter()
+            app.config.teamspeak_users = app
+                .ts3_users
+                .iter()
                 .filter(|r| !r.name_input.trim().is_empty())
                 .map(|r| UserOverride {
                     name: r.name_input.trim().to_string(),
@@ -465,15 +614,20 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
 fn view(app: &App) -> Element<'_, Message> {
     let tab_bar = row![
         tab_btn("PipeWire", Tab::PipeWire, &app.tab),
-        tab_btn("Discord",  Tab::Discord,  &app.tab),
+        tab_btn("Discord", Tab::Discord, &app.tab),
         tab_btn("TeamSpeak", Tab::TeamSpeak, &app.tab),
     ]
     .spacing(4)
-    .padding(Padding { top: 8.0, right: 8.0, bottom: 0.0, left: 8.0 });
+    .padding(Padding {
+        top: 8.0,
+        right: 8.0,
+        bottom: 0.0,
+        left: 8.0,
+    });
 
     let content: Element<Message> = match app.tab {
-        Tab::PipeWire  => view_pipewire(app),
-        Tab::Discord   => view_discord(app),
+        Tab::PipeWire => view_pipewire(app),
+        Tab::Discord => view_discord(app),
         Tab::TeamSpeak => view_teamspeak(app),
     };
 
@@ -500,7 +654,11 @@ fn view(app: &App) -> Element<'_, Message> {
 fn tab_btn<'a>(label: &'static str, tab: Tab, current: &Tab) -> Element<'a, Message> {
     let active = &tab == current;
     let b = button(text(label)).on_press(Message::TabSelected(tab));
-    if active { b.style(button::primary).into() } else { b.style(button::secondary).into() }
+    if active {
+        b.style(button::primary).into()
+    } else {
+        b.style(button::secondary).into()
+    }
 }
 
 // ---- PipeWire tab ---------------------------------------------------------
@@ -520,26 +678,35 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
         button("Refresh").on_press(Message::Refresh),
     ]
     .spacing(8)
-    .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
+    .padding(Padding {
+        top: 8.0,
+        right: 8.0,
+        bottom: 4.0,
+        left: 8.0,
+    })
     .align_y(iced::alignment::Vertical::Center);
 
     let mut children: Vec<Element<Message>> = vec![header.into()];
 
     if app.streams.is_empty() {
-        children.push(
-            text("No streams found. Play some audio and click Refresh.").into()
-        );
+        children.push(text("No streams found. Play some audio and click Refresh.").into());
     }
 
     // Check which streams have children (for showing auto-link toggle)
-    let has_children: std::collections::HashSet<String> = app.streams.iter()
+    let has_children: std::collections::HashSet<String> = app
+        .streams
+        .iter()
         .filter_map(|s| s.parent_key.clone())
         .collect();
 
     // Render root streams first, then their children indented below
     for (i, stream) in app.streams.iter().enumerate() {
-        if stream.parent_key.is_some() { continue; } // rendered under parent
-        if app.hide_offline && !stream.is_live { continue; }
+        if stream.parent_key.is_some() {
+            continue;
+        } // rendered under parent
+        if app.hide_offline && !stream.is_live {
+            continue;
+        }
         let key = stream_row_key(stream);
         let is_parent = has_children.contains(&key);
         let is_expanded = app.expanded_streams.contains(&key);
@@ -549,22 +716,47 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
         if is_parent && is_expanded {
             for (j, child) in app.streams.iter().enumerate() {
                 if child.parent_key.as_deref() == Some(&key) {
-                    if app.hide_offline && !child.is_live { continue; }
-                    children.push(stream_card(j, child, true, false, false, stream.auto_link_children));
+                    if app.hide_offline && !child.is_live {
+                        continue;
+                    }
+                    children.push(stream_card(
+                        j,
+                        child,
+                        true,
+                        false,
+                        false,
+                        stream.auto_link_children,
+                    ));
                 }
             }
         }
     }
 
-    Column::with_children(children).spacing(6).padding(8).width(Length::Fill).into()
+    Column::with_children(children)
+        .spacing(6)
+        .padding(8)
+        .width(Length::Fill)
+        .into()
 }
 
-fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is_expanded: bool, is_linked: bool) -> Element<'_, Message> {
+fn stream_card(
+    i: usize,
+    stream: &StreamRow,
+    is_child: bool,
+    is_parent: bool,
+    is_expanded: bool,
+    is_linked: bool,
+) -> Element<'_, Message> {
     // Display label: show raw_name for readability, fall back to binary/app_id
-    let display_label = if !stream.raw_name.is_empty() { &stream.raw_name }
-        else if !stream.binary.is_empty() { &stream.binary }
-        else if !stream.app_id.is_empty() { &stream.app_id }
-        else { "?" };
+    let display_label = if !stream.raw_name.is_empty() {
+        &stream.raw_name
+    } else if !stream.binary.is_empty() {
+        &stream.binary
+    } else if !stream.app_id.is_empty() {
+        &stream.app_id
+    } else {
+        "?"
+    };
     let (status_label, status_color) = if stream.is_live {
         ("live", Color::from_rgb8(0x4C, 0xAF, 0x50))
     } else {
@@ -580,17 +772,30 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
             button(text(arrow).size(11))
                 .on_press(Message::ToggleStreamExpand(toggle_key))
                 .style(button::text)
-                .padding(Padding { top: 0.0, right: 2.0, bottom: 0.0, left: 0.0 })
-                .into()
+                .padding(Padding {
+                    top: 0.0,
+                    right: 2.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .into(),
         );
     } else if is_child {
-        header_children.push(text("  └").size(13).color(Color::from_rgb8(0x60, 0x60, 0x60)).into());
+        header_children.push(
+            text("  └")
+                .size(13)
+                .color(Color::from_rgb8(0x60, 0x60, 0x60))
+                .into(),
+        );
     }
     header_children.push(text(display_label).size(13).into());
     header_children.push(text(status_label).size(11).color(status_color).into());
     if is_linked {
         header_children.push(
-            text("(linked)").size(11).color(Color::from_rgb8(0x5C, 0xFF, 0xE8)).into()
+            text("(linked)")
+                .size(11)
+                .color(Color::from_rgb8(0x5C, 0xFF, 0xE8))
+                .into(),
         );
     }
     let header = Row::with_children(header_children)
@@ -607,22 +812,30 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
 
     // Accent colour row — only shown when stream currently shows bottom text
     let accent_row: Option<Element<Message>> = if stream.is_live && stream.has_media_name {
-        Some(row![
-            text("Accent:").size(12),
-            color_picker_row(stream.accent_color, move |c| Message::StreamAccentColorSelected(i, c)),
-        ]
-        .spacing(8)
-        .align_y(iced::alignment::Vertical::Center)
-        .into())
+        Some(
+            row![
+                text("Accent:").size(12),
+                color_picker_row(stream.accent_color, move |c| {
+                    Message::StreamAccentColorSelected(i, c)
+                }),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center)
+            .into(),
+        )
     } else if stream.accent_color.is_some() {
         // Offline but has a saved accent — show it so it can be cleared
-        Some(row![
-            text("Accent:").size(12),
-            color_picker_row(stream.accent_color, move |c| Message::StreamAccentColorSelected(i, c)),
-        ]
-        .spacing(8)
-        .align_y(iced::alignment::Vertical::Center)
-        .into())
+        Some(
+            row![
+                text("Accent:").size(12),
+                color_picker_row(stream.accent_color, move |c| {
+                    Message::StreamAccentColorSelected(i, c)
+                }),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center)
+            .into(),
+        )
     } else {
         None
     };
@@ -643,7 +856,7 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
                 .on_toggle(move |v| Message::StreamAutoLinkToggled(i, v))
                 .size(14)
                 .text_size(12)
-                .into()
+                .into(),
         );
     }
     name_row_children.extend([
@@ -666,11 +879,8 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center);
 
-    let mut col_children: Vec<Element<Message>> = vec![
-        header.into(),
-        name_row.into(),
-        top_color_row.into(),
-    ];
+    let mut col_children: Vec<Element<Message>> =
+        vec![header.into(), name_row.into(), top_color_row.into()];
     if let Some(ar) = accent_row {
         col_children.push(ar);
     }
@@ -684,7 +894,9 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
     let is_child_copy = is_child;
 
     let card = container(
-        Column::with_children(col_children).spacing(5).width(Length::Fill),
+        Column::with_children(col_children)
+            .spacing(5)
+            .width(Length::Fill),
     )
     .padding(Padding::new(8.0))
     .width(Length::Fill)
@@ -708,7 +920,12 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
 
     if is_child {
         container(card)
-            .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: left_pad })
+            .padding(Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: left_pad,
+            })
             .width(Length::Fill)
             .into()
     } else {
@@ -719,23 +936,33 @@ fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is
 // ---- Discord tab ----------------------------------------------------------
 
 fn view_discord(app: &App) -> Element<'_, Message> {
-    let already_added: std::collections::HashSet<&str> =
-        app.discord_users.iter().map(|r| r.name_input.as_str()).collect();
+    let already_added: std::collections::HashSet<&str> = app
+        .discord_users
+        .iter()
+        .map(|r| r.name_input.as_str())
+        .collect();
 
-    let available: Vec<String> = app.discord_active.iter()
+    let available: Vec<String> = app
+        .discord_active
+        .iter()
         .filter(|n| !already_added.contains(n.as_str()))
         .cloned()
         .collect();
 
     let active_picker: Element<Message> = if available.is_empty() {
-        text("No active users (start Discord and join a voice channel)").size(12)
+        text("No active users (start Discord and join a voice channel)")
+            .size(12)
             .color(Color::from_rgb8(0x80, 0x80, 0x80))
             .into()
     } else {
         row![
             text("Active users:").size(12),
-            pick_list(available, app.discord_add_sel.clone(), Message::DiscordActiveUserSelected)
-                .text_size(12),
+            pick_list(
+                available,
+                app.discord_add_sel.clone(),
+                Message::DiscordActiveUserSelected
+            )
+            .text_size(12),
             button("Add").on_press(Message::AddDiscordUserFromActive),
         ]
         .spacing(8)
@@ -743,7 +970,12 @@ fn view_discord(app: &App) -> Element<'_, Message> {
         .into()
     };
 
-    let discord_enabled = app.config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
+    let discord_enabled = app
+        .config
+        .discord
+        .as_ref()
+        .map(|d| d.enabled)
+        .unwrap_or(false);
     let enabled_checkbox: Element<Message> = if app.config.discord.is_some() {
         checkbox("Enabled", discord_enabled)
             .on_toggle(Message::SetDiscordEnabled)
@@ -751,7 +983,8 @@ fn view_discord(app: &App) -> Element<'_, Message> {
             .text_size(12)
             .into()
     } else {
-        text("Add [discord] to config.toml to enable").size(11)
+        text("Add [discord] to config.toml to enable")
+            .size(11)
             .color(Color::from_rgb8(0x80, 0x80, 0x80))
             .into()
     };
@@ -762,18 +995,20 @@ fn view_discord(app: &App) -> Element<'_, Message> {
         button("+ Manual").on_press(Message::AddDiscordUser),
     ]
     .spacing(8)
-    .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
+    .padding(Padding {
+        top: 8.0,
+        right: 8.0,
+        bottom: 4.0,
+        left: 8.0,
+    })
     .align_y(iced::alignment::Vertical::Center);
 
-    let help = text("Set a color or priority for each user. Lower priority = appears first on device.")
-        .size(12)
-        .color(Color::from_rgb8(0xA0, 0xA0, 0xA0));
+    let help =
+        text("Set a color or priority for each user. Lower priority = appears first on device.")
+            .size(12)
+            .color(Color::from_rgb8(0xA0, 0xA0, 0xA0));
 
-    let mut children: Vec<Element<Message>> = vec![
-        header.into(),
-        help.into(),
-        active_picker,
-    ];
+    let mut children: Vec<Element<Message>> = vec![header.into(), help.into(), active_picker];
 
     if app.discord_users.is_empty() {
         children.push(text("No saved user overrides.").size(12).into());
@@ -782,7 +1017,11 @@ fn view_discord(app: &App) -> Element<'_, Message> {
         children.push(discord_user_row(i, user));
     }
 
-    Column::with_children(children).spacing(6).padding(8).width(Length::Fill).into()
+    Column::with_children(children)
+        .spacing(6)
+        .padding(8)
+        .width(Length::Fill)
+        .into()
 }
 
 fn discord_user_row(i: usize, user: &UserRow) -> Element<'_, Message> {
@@ -809,23 +1048,33 @@ fn discord_user_row(i: usize, user: &UserRow) -> Element<'_, Message> {
 // ---- TeamSpeak tab --------------------------------------------------------
 
 fn view_teamspeak(app: &App) -> Element<'_, Message> {
-    let already_added: std::collections::HashSet<&str> =
-        app.ts3_users.iter().map(|r| r.name_input.as_str()).collect();
+    let already_added: std::collections::HashSet<&str> = app
+        .ts3_users
+        .iter()
+        .map(|r| r.name_input.as_str())
+        .collect();
 
-    let available: Vec<String> = app.ts3_active.iter()
+    let available: Vec<String> = app
+        .ts3_active
+        .iter()
         .filter(|n| !already_added.contains(n.as_str()))
         .cloned()
         .collect();
 
     let active_picker: Element<Message> = if available.is_empty() {
-        text("No active users (join a TeamSpeak channel)").size(12)
+        text("No active users (join a TeamSpeak channel)")
+            .size(12)
             .color(Color::from_rgb8(0x80, 0x80, 0x80))
             .into()
     } else {
         row![
             text("Active users:").size(12),
-            pick_list(available, app.ts3_add_sel.clone(), Message::Ts3ActiveUserSelected)
-                .text_size(12),
+            pick_list(
+                available,
+                app.ts3_add_sel.clone(),
+                Message::Ts3ActiveUserSelected
+            )
+            .text_size(12),
             button("Add").on_press(Message::AddTs3UserFromActive),
         ]
         .spacing(8)
@@ -833,7 +1082,12 @@ fn view_teamspeak(app: &App) -> Element<'_, Message> {
         .into()
     };
 
-    let ts3_enabled = app.config.teamspeak.as_ref().map(|t| t.enabled).unwrap_or(false);
+    let ts3_enabled = app
+        .config
+        .teamspeak
+        .as_ref()
+        .map(|t| t.enabled)
+        .unwrap_or(false);
     let enabled_checkbox: Element<Message> = if app.config.teamspeak.is_some() {
         checkbox("Enabled", ts3_enabled)
             .on_toggle(Message::SetTeamspeakEnabled)
@@ -841,7 +1095,8 @@ fn view_teamspeak(app: &App) -> Element<'_, Message> {
             .text_size(12)
             .into()
     } else {
-        text("Add [teamspeak] to config.toml to enable").size(11)
+        text("Add [teamspeak] to config.toml to enable")
+            .size(11)
             .color(Color::from_rgb8(0x80, 0x80, 0x80))
             .into()
     };
@@ -852,18 +1107,20 @@ fn view_teamspeak(app: &App) -> Element<'_, Message> {
         button("+ Manual").on_press(Message::AddTs3User),
     ]
     .spacing(8)
-    .padding(Padding { top: 8.0, right: 8.0, bottom: 4.0, left: 8.0 })
+    .padding(Padding {
+        top: 8.0,
+        right: 8.0,
+        bottom: 4.0,
+        left: 8.0,
+    })
     .align_y(iced::alignment::Vertical::Center);
 
-    let help = text("Set a color or priority for each user. Lower priority = appears first on device.")
-        .size(12)
-        .color(Color::from_rgb8(0xA0, 0xA0, 0xA0));
+    let help =
+        text("Set a color or priority for each user. Lower priority = appears first on device.")
+            .size(12)
+            .color(Color::from_rgb8(0xA0, 0xA0, 0xA0));
 
-    let mut children: Vec<Element<Message>> = vec![
-        header.into(),
-        help.into(),
-        active_picker,
-    ];
+    let mut children: Vec<Element<Message>> = vec![header.into(), help.into(), active_picker];
 
     if app.ts3_users.is_empty() {
         children.push(text("No saved user overrides.").size(12).into());
@@ -872,7 +1129,11 @@ fn view_teamspeak(app: &App) -> Element<'_, Message> {
         children.push(ts3_user_row(i, user));
     }
 
-    Column::with_children(children).spacing(6).padding(8).width(Length::Fill).into()
+    Column::with_children(children)
+        .spacing(6)
+        .padding(8)
+        .width(Length::Fill)
+        .into()
 }
 
 fn ts3_user_row(i: usize, user: &UserRow) -> Element<'_, Message> {

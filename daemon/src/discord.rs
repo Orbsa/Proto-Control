@@ -3,10 +3,10 @@
 //! Connects to Discord's local IPC socket, authenticates via OAuth,
 //! and exposes voice channel members for the main loop to control.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -28,20 +28,24 @@ fn next_nonce() -> String {
 pub struct VoiceMember {
     pub user_id: String,
     pub nick: String,
-    pub volume: u16,  // 0-200 Discord IPC scale
+    pub volume: u16, // 0-200 Discord IPC scale
     pub muted: bool,
-    pub self_muted: bool,    // user muted their own mic
-    pub self_deafened: bool, // user deafened themselves
-    pub streaming: bool,     // user is Go Live streaming
+    pub self_muted: bool,          // user muted their own mic
+    pub self_deafened: bool,       // user deafened themselves
+    pub streaming: bool,           // user is Go Live streaming
     pub game_name: Option<String>, // activity / game name if available
 }
 
 impl VoiceMember {
     /// Sort key: 0 = active, 1 = self-muted only, 2 = deafened.
     pub fn activity_key(&self) -> u8 {
-        if self.self_deafened { 2 }
-        else if self.self_muted { 1 }
-        else { 0 }
+        if self.self_deafened {
+            2
+        } else if self.self_muted {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -87,12 +91,12 @@ fn run_client(
     cmd_rx: &mpsc::Receiver<Command>,
 ) -> Result<()> {
     // 1. Connect to IPC socket
-    let socket_path = find_discord_socket()
-        .context("Discord IPC socket not found. Is Discord running?")?;
+    let socket_path =
+        find_discord_socket().context("Discord IPC socket not found. Is Discord running?")?;
     info!("Connecting to Discord IPC at {}", socket_path.display());
 
-    let mut stream = UnixStream::connect(&socket_path)
-        .context("Failed to connect to Discord IPC")?;
+    let mut stream =
+        UnixStream::connect(&socket_path).context("Failed to connect to Discord IPC")?;
 
     // 2. Handshake
     let handshake = json!({"v": 1, "client_id": client_id});
@@ -100,7 +104,9 @@ fn run_client(
     let (_, ready) = read_frame(&mut stream)?;
 
     let self_user_id = ready["data"]["user"]["id"]
-        .as_str().unwrap_or("").to_string();
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     info!("Discord connected as user {}", self_user_id);
 
     // 3. Authenticate
@@ -108,7 +114,12 @@ fn run_client(
     info!("Discord authenticated");
 
     // 4. Subscribe to global voice channel select event
-    send_rpc(&mut stream, "SUBSCRIBE", json!({}), Some("VOICE_CHANNEL_SELECT"))?;
+    send_rpc(
+        &mut stream,
+        "SUBSCRIBE",
+        json!({}),
+        Some("VOICE_CHANNEL_SELECT"),
+    )?;
 
     // 5. Get initial voice channel state
     send_rpc(&mut stream, "GET_SELECTED_VOICE_CHANNEL", json!({}), None)?;
@@ -123,16 +134,26 @@ fn run_client(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 Command::SetVolume { user_id, volume } => {
-                    send_rpc(&mut stream, "SET_USER_VOICE_SETTINGS", json!({
-                        "user_id": user_id,
-                        "volume": volume,
-                    }), None)?;
+                    send_rpc(
+                        &mut stream,
+                        "SET_USER_VOICE_SETTINGS",
+                        json!({
+                            "user_id": user_id,
+                            "volume": volume,
+                        }),
+                        None,
+                    )?;
                 }
                 Command::SetMute { user_id, muted } => {
-                    send_rpc(&mut stream, "SET_USER_VOICE_SETTINGS", json!({
-                        "user_id": user_id,
-                        "mute": muted,
-                    }), None)?;
+                    send_rpc(
+                        &mut stream,
+                        "SET_USER_VOICE_SETTINGS",
+                        json!({
+                            "user_id": user_id,
+                            "mute": muted,
+                        }),
+                        None,
+                    )?;
                 }
             }
         }
@@ -155,11 +176,17 @@ fn run_client(
             ("DISPATCH", "VOICE_CHANNEL_SELECT") => {
                 info!("Voice channel select raw data: {}", msg["data"]);
                 let new_channel = msg["data"]["channel_id"].as_str().map(String::from);
-                info!("Voice channel select: {:?} -> {:?}", current_channel_id, new_channel);
+                info!(
+                    "Voice channel select: {:?} -> {:?}",
+                    current_channel_id, new_channel
+                );
                 if new_channel != current_channel_id {
                     handle_channel_switch(
-                        &mut stream, &mut current_channel_id, new_channel,
-                        &mut current_members, members_tx,
+                        &mut stream,
+                        &mut current_channel_id,
+                        new_channel,
+                        &mut current_members,
+                        members_tx,
                     )?;
                 }
             }
@@ -168,9 +195,8 @@ fn run_client(
             ("GET_SELECTED_VOICE_CHANNEL", _) if evt != "ERROR" => {
                 let new_channel = msg["data"]["id"].as_str().map(String::from);
                 if new_channel.is_some() {
-                    current_members = parse_voice_states(
-                        &msg["data"]["voice_states"], &self_user_id,
-                    );
+                    current_members =
+                        parse_voice_states(&msg["data"]["voice_states"], &self_user_id);
                     if let Some(ref id) = new_channel {
                         subscribe_channel_events(&mut stream, id)?;
                     }
@@ -207,20 +233,35 @@ fn run_client(
                         let mut changed = false;
                         if let Some(v) = msg["data"]["volume"].as_f64() {
                             let new_vol = v.round() as u16;
-                            if member.volume != new_vol { member.volume = new_vol; changed = true; }
+                            if member.volume != new_vol {
+                                member.volume = new_vol;
+                                changed = true;
+                            }
                         }
                         if let Some(m) = msg["data"]["mute"].as_bool() {
-                            if member.muted != m { member.muted = m; changed = true; }
+                            if member.muted != m {
+                                member.muted = m;
+                                changed = true;
+                            }
                         }
                         let vs = &msg["data"]["voice_state"];
                         if let Some(sm) = vs["self_mute"].as_bool() {
-                            if member.self_muted != sm { member.self_muted = sm; changed = true; }
+                            if member.self_muted != sm {
+                                member.self_muted = sm;
+                                changed = true;
+                            }
                         }
                         if let Some(sd) = vs["self_deaf"].as_bool() {
-                            if member.self_deafened != sd { member.self_deafened = sd; changed = true; }
+                            if member.self_deafened != sd {
+                                member.self_deafened = sd;
+                                changed = true;
+                            }
                         }
                         if let Some(ss) = vs["self_stream"].as_bool() {
-                            if member.streaming != ss { member.streaming = ss; changed = true; }
+                            if member.streaming != ss {
+                                member.streaming = ss;
+                                changed = true;
+                            }
                         }
                         // Re-parse game name from updated state
                         if let Some(updated) = parse_voice_member(&msg["data"]) {
@@ -286,7 +327,11 @@ fn write_frame(stream: &mut UnixStream, opcode: u32, payload: &Value) -> Result<
     buf.extend_from_slice(&json_bytes);
     stream.write_all(&buf)?;
     stream.flush()?;
-    debug!("Discord TX: op={} {}", opcode, String::from_utf8_lossy(&json_bytes));
+    debug!(
+        "Discord TX: op={} {}",
+        opcode,
+        String::from_utf8_lossy(&json_bytes)
+    );
     Ok(())
 }
 
@@ -298,7 +343,11 @@ fn read_frame(stream: &mut UnixStream) -> Result<(u32, Value)> {
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload)?;
     let json: Value = serde_json::from_slice(&payload)?;
-    debug!("Discord RX: op={} {}", opcode, String::from_utf8_lossy(&payload));
+    debug!(
+        "Discord RX: op={} {}",
+        opcode,
+        String::from_utf8_lossy(&payload)
+    );
     Ok((opcode, json))
 }
 
@@ -366,7 +415,12 @@ fn authenticate(stream: &mut UnixStream, client_id: &str, client_secret: &str) -
 }
 
 fn try_authenticate(stream: &mut UnixStream, access_token: &str) -> Result<bool> {
-    send_rpc(stream, "AUTHENTICATE", json!({"access_token": access_token}), None)?;
+    send_rpc(
+        stream,
+        "AUTHENTICATE",
+        json!({"access_token": access_token}),
+        None,
+    )?;
     // Need to read with full timeout for auth response
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let (_, resp) = read_frame(stream)?;
@@ -380,10 +434,15 @@ fn try_authenticate(stream: &mut UnixStream, access_token: &str) -> Result<bool>
 }
 
 fn authorize(stream: &mut UnixStream, client_id: &str) -> Result<String> {
-    send_rpc(stream, "AUTHORIZE", json!({
-        "client_id": client_id,
-        "scopes": ["rpc", "rpc.voice.read", "rpc.voice.write"],
-    }), None)?;
+    send_rpc(
+        stream,
+        "AUTHORIZE",
+        json!({
+            "client_id": client_id,
+            "scopes": ["rpc", "rpc.voice.read", "rpc.voice.write"],
+        }),
+        None,
+    )?;
 
     // Wait for user to click authorize (could take a while)
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
@@ -394,7 +453,8 @@ fn authorize(stream: &mut UnixStream, client_id: &str) -> Result<String> {
         bail!("AUTHORIZE failed: {}", resp["data"]["message"]);
     }
 
-    resp["data"]["code"].as_str()
+    resp["data"]["code"]
+        .as_str()
         .map(String::from)
         .context("No code in AUTHORIZE response")
 }
@@ -418,10 +478,14 @@ fn refresh_token(client_id: &str, client_secret: &str, refresh: &str) -> Option<
 fn token_request(body: &str) -> Result<TokenData> {
     let output = std::process::Command::new("curl")
         .args([
-            "-s", "-X", "POST",
+            "-s",
+            "-X",
+            "POST",
             "https://discord.com/api/oauth2/token",
-            "-H", "Content-Type: application/x-www-form-urlencoded",
-            "-d", body,
+            "-H",
+            "Content-Type: application/x-www-form-urlencoded",
+            "-d",
+            body,
         ])
         .output()
         .context("Failed to run curl for Discord token exchange")?;
@@ -430,16 +494,18 @@ fn token_request(body: &str) -> Result<TokenData> {
         bail!("curl failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
-    let json: Value = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse token response")?;
+    let json: Value =
+        serde_json::from_slice(&output.stdout).context("Failed to parse token response")?;
 
     if let Some(err) = json["error"].as_str() {
         bail!("Token exchange error: {}", err);
     }
 
     Ok(TokenData {
-        access_token: json["access_token"].as_str()
-            .context("No access_token in response")?.to_string(),
+        access_token: json["access_token"]
+            .as_str()
+            .context("No access_token in response")?
+            .to_string(),
         refresh_token: json["refresh_token"].as_str().map(String::from),
     })
 }
@@ -479,14 +545,24 @@ const CHANNEL_EVENTS: &[&str] = &[
 
 fn subscribe_channel_events(stream: &mut UnixStream, channel_id: &str) -> Result<()> {
     for event in CHANNEL_EVENTS {
-        send_rpc(stream, "SUBSCRIBE", json!({"channel_id": channel_id}), Some(event))?;
+        send_rpc(
+            stream,
+            "SUBSCRIBE",
+            json!({"channel_id": channel_id}),
+            Some(event),
+        )?;
     }
     Ok(())
 }
 
 fn unsubscribe_channel_events(stream: &mut UnixStream, channel_id: &str) -> Result<()> {
     for event in CHANNEL_EVENTS {
-        send_rpc(stream, "UNSUBSCRIBE", json!({"channel_id": channel_id}), Some(event))?;
+        send_rpc(
+            stream,
+            "UNSUBSCRIBE",
+            json!({"channel_id": channel_id}),
+            Some(event),
+        )?;
     }
     Ok(())
 }
@@ -497,7 +573,8 @@ fn parse_voice_states(voice_states: &Value, self_user_id: &str) -> Vec<VoiceMemb
     let Some(states) = voice_states.as_array() else {
         return vec![];
     };
-    states.iter()
+    states
+        .iter()
         .filter_map(|s| parse_voice_member(s))
         .filter(|m| m.user_id != self_user_id)
         .collect()
@@ -505,19 +582,21 @@ fn parse_voice_states(voice_states: &Value, self_user_id: &str) -> Vec<VoiceMemb
 
 fn parse_voice_member(state: &Value) -> Option<VoiceMember> {
     let user_id = state["user"]["id"].as_str()?.to_string();
-    let nick = state["nick"].as_str()
+    let nick = state["nick"]
+        .as_str()
         .or_else(|| state["user"]["username"].as_str())
         .unwrap_or("?")
         .to_string();
     let volume = state["volume"].as_f64().unwrap_or(100.0).round() as u16;
     let muted = state["mute"].as_bool().unwrap_or(false);
     let vs = &state["voice_state"];
-    let self_muted    = vs["self_mute"].as_bool().unwrap_or(false);
+    let self_muted = vs["self_mute"].as_bool().unwrap_or(false);
     let self_deafened = vs["self_deaf"].as_bool().unwrap_or(false);
-    let streaming     = vs["self_stream"].as_bool().unwrap_or(false);
+    let streaming = vs["self_stream"].as_bool().unwrap_or(false);
 
     // Try to extract game/activity name from various locations Discord RPC may provide it
-    let game_name = state["activity"]["name"].as_str()
+    let game_name = state["activity"]["name"]
+        .as_str()
         .or_else(|| state["game"]["name"].as_str())
         .or_else(|| {
             // activities array — pick first non-custom-status entry
@@ -530,10 +609,22 @@ fn parse_voice_member(state: &Value) -> Option<VoiceMember> {
         .map(String::from);
 
     if streaming {
-        debug!("Streaming member {}: game={:?}, full state: {}", nick, game_name, state);
+        debug!(
+            "Streaming member {}: game={:?}, full state: {}",
+            nick, game_name, state
+        );
     }
 
-    Some(VoiceMember { user_id, nick, volume, muted, self_muted, self_deafened, streaming, game_name })
+    Some(VoiceMember {
+        user_id,
+        nick,
+        volume,
+        muted,
+        self_muted,
+        self_deafened,
+        streaming,
+        game_name,
+    })
 }
 
 // ---- IPC socket discovery ----

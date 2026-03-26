@@ -23,9 +23,15 @@ pub fn default_socket_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     // Flatpak TS3 maps its $HOME to ~/.var/app/com.teamspeak.TeamSpeak3/ on the host,
     // so the plugin writes the socket at that path.
-    let flatpak = format!("{}/.var/app/com.teamspeak.TeamSpeak3/.ts3client/rotocontrol-ts3.sock", home);
-    let native  = format!("{}/.ts3client/rotocontrol-ts3.sock", home);
-    if std::path::Path::new(&flatpak).parent().map_or(false, |p| p.exists()) {
+    let flatpak = format!(
+        "{}/.var/app/com.teamspeak.TeamSpeak3/.ts3client/rotocontrol-ts3.sock",
+        home
+    );
+    let native = format!("{}/.ts3client/rotocontrol-ts3.sock", home);
+    if std::path::Path::new(&flatpak)
+        .parent()
+        .map_or(false, |p| p.exists())
+    {
         flatpak
     } else {
         native
@@ -37,7 +43,7 @@ pub struct TsMember {
     pub client_id: u16,
     pub nick: String,
     pub muted: bool,
-    pub volume: u16, // 0-200, tracked locally; default 100 = 0 dB (no change)
+    pub volume: u16,         // 0-200, tracked locally; default 100 = 0 dB (no change)
     pub self_muted: bool,    // user muted their own mic
     pub self_deafened: bool, // user deafened themselves
 }
@@ -45,9 +51,13 @@ pub struct TsMember {
 impl TsMember {
     /// Sort key: 0 = active, 1 = self-muted only, 2 = deafened.
     pub fn activity_key(&self) -> u8 {
-        if self.self_deafened { 2 }
-        else if self.self_muted { 1 }
-        else { 0 }
+        if self.self_deafened {
+            2
+        } else if self.self_muted {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -68,13 +78,15 @@ pub fn start(socket_path: String) -> TsHandle {
 
     thread::Builder::new()
         .name("teamspeak".into())
-        .spawn(move || loop {
-            match run_client(&socket_path, &members_tx, &cmd_rx) {
-                Ok(()) => break,
-                Err(e) => {
-                    warn!("TeamSpeak IPC error: {}. Reconnecting in 5s...", e);
-                    let _ = members_tx.send(vec![]);
-                    thread::sleep(Duration::from_secs(5));
+        .spawn(move || {
+            loop {
+                match run_client(&socket_path, &members_tx, &cmd_rx) {
+                    Ok(()) => break,
+                    Err(e) => {
+                        warn!("TeamSpeak IPC error: {}. Reconnecting in 5s...", e);
+                        let _ = members_tx.send(vec![]);
+                        thread::sleep(Duration::from_secs(5));
+                    }
                 }
             }
         })

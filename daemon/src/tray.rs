@@ -2,8 +2,8 @@
 
 use ksni::blocking::TrayMethods;
 use log::warn;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 #[cfg(has_tray_icon)]
@@ -84,9 +84,9 @@ pub fn spawn(shutdown: Arc<AtomicBool>) -> Option<JoinHandle<()>> {
 
 /// Decode a PNG image to ksni::Icon (ARGB32 network byte order).
 fn decode_png_to_argb32(png_data: &[u8]) -> Option<ksni::Icon> {
-    let decoder = png::Decoder::new(png_data);
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_data));
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let rgba = &buf[..info.buffer_size()];
 

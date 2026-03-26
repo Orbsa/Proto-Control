@@ -10,8 +10,8 @@ mod tray;
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_CONTROLS: usize = 32; // 4 pages × 8 controls per setup
@@ -62,7 +62,9 @@ fn partition_linked_streams(
             }
             // Process ancestry: check if our PID is a child of another stream's PID
             for (&other_pid, &first_idx) in &pid_to_first {
-                if other_pid == pid { continue; }
+                if other_pid == pid {
+                    continue;
+                }
                 if pipewire::is_descendant(pid, other_pid) {
                     parent_of[i] = Some(first_idx);
                     break;
@@ -140,7 +142,10 @@ fn main() -> Result<()> {
 
     // Verify firmware
     let version = dev.get_version()?;
-    info!("Firmware: {}.{}.{} ({})", version.major, version.minor, version.patch, version.commit);
+    info!(
+        "Firmware: {}.{}.{} ({})",
+        version.major, version.minor, version.patch, version.commit
+    );
 
     // 2. Switch to MIDI mode and set setup names
     info!("Switching to MIDI mode...");
@@ -149,12 +154,19 @@ fn main() -> Result<()> {
 
     // 3. Load config and enumerate PipeWire streams
     let mut config = config::Config::load();
-    let (mut assigned_streams, mut linked_child_ids): (Vec<pipewire::AudioStream>, HashMap<usize, Vec<u32>>) = if config.pipewire_enabled {
+    let (mut assigned_streams, mut linked_child_ids): (
+        Vec<pipewire::AudioStream>,
+        HashMap<usize, Vec<u32>>,
+    ) = if config.pipewire_enabled {
         let streams = pipewire::list_streams(&config)?;
         let (visible, linked) = partition_linked_streams(streams, &config);
         let num_assigned = visible.len().min(MAX_CONTROLS);
-        info!("Found {} visible audio streams (+ {} linked children), assigning {} to knobs",
-            visible.len(), linked.values().map(|v| v.len()).sum::<usize>(), num_assigned);
+        info!(
+            "Found {} visible audio streams (+ {} linked children), assigning {} to knobs",
+            visible.len(),
+            linked.values().map(|v| v.len()).sum::<usize>(),
+            num_assigned
+        );
         (visible.into_iter().take(MAX_CONTROLS).collect(), linked)
     } else {
         info!("PipeWire integration disabled");
@@ -182,7 +194,10 @@ fn main() -> Result<()> {
         if dc.enabled {
             dev.set_setup_name(1, "Discord")?;
             info!("Starting Discord voice integration...");
-            Some(discord::start(dc.client_id.clone(), dc.client_secret.clone()))
+            Some(discord::start(
+                dc.client_id.clone(),
+                dc.client_secret.clone(),
+            ))
         } else {
             info!("Discord integration disabled");
             None
@@ -260,16 +275,22 @@ fn main() -> Result<()> {
                 midi::DeviceEvent::ButtonPress { index, value } if index < midi::NUM_CONTROLS => {
                     pending_buttons[index] = Some(value);
                 }
-                midi::DeviceEvent::DiscordKnobTurn { index, value } if index < midi::NUM_CONTROLS => {
+                midi::DeviceEvent::DiscordKnobTurn { index, value }
+                    if index < midi::NUM_CONTROLS =>
+                {
                     pending_discord_knobs[index] = Some(value);
                 }
-                midi::DeviceEvent::DiscordButtonPress { index, value } if index < midi::NUM_CONTROLS => {
+                midi::DeviceEvent::DiscordButtonPress { index, value }
+                    if index < midi::NUM_CONTROLS =>
+                {
                     pending_discord_buttons[index] = Some(value);
                 }
                 midi::DeviceEvent::Ts3KnobTurn { index, value } if index < midi::NUM_CONTROLS => {
                     pending_ts3_knobs[index] = Some(value);
                 }
-                midi::DeviceEvent::Ts3ButtonPress { index, value } if index < midi::NUM_CONTROLS => {
+                midi::DeviceEvent::Ts3ButtonPress { index, value }
+                    if index < midi::NUM_CONTROLS =>
+                {
                     pending_ts3_buttons[index] = Some(value);
                 }
                 _ => {}
@@ -282,7 +303,12 @@ fn main() -> Result<()> {
                 if index < assigned_streams.len() {
                     let stream = &mut assigned_streams[index];
                     let new_volume = cc_to_volume(value);
-                    debug!("Knob {}: {} -> {:.0}%", index, stream.app_name, new_volume * 100.0);
+                    debug!(
+                        "Knob {}: {} -> {:.0}%",
+                        index,
+                        stream.app_name,
+                        new_volume * 100.0
+                    );
                     if let Err(e) = pipewire::set_volume(stream.id, new_volume) {
                         warn!("Failed to set volume for {}: {}", stream.app_name, e);
                     }
@@ -308,12 +334,16 @@ fn main() -> Result<()> {
                             warn!("Failed to toggle mute for {}: {}", stream.app_name, e);
                         }
                         stream.muted = now_muted;
-                        volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
+                        volume_memory
+                            .insert(stream.app_name.clone(), (stream.volume, stream.muted));
                         // Propagate mute toggle to linked children
                         if let Some(child_ids) = linked_child_ids.get(&index) {
                             for &child_id in child_ids {
                                 if let Err(e) = pipewire::toggle_mute(child_id) {
-                                    warn!("Failed to toggle linked child mute (id={}): {}", child_id, e);
+                                    warn!(
+                                        "Failed to toggle linked child mute (id={}): {}",
+                                        child_id, e
+                                    );
                                 }
                             }
                         }
@@ -329,7 +359,10 @@ fn main() -> Result<()> {
                     if index < discord_members.len() {
                         let member = &mut discord_members[index];
                         let new_volume = cc_to_discord_volume(value);
-                        debug!("Discord knob {}: {} -> vol {}", index, member.nick, new_volume);
+                        debug!(
+                            "Discord knob {}: {} -> vol {}",
+                            index, member.nick, new_volume
+                        );
                         let _ = handle.cmd_tx.send(discord::Command::SetVolume {
                             user_id: member.user_id.clone(),
                             volume: new_volume,
@@ -341,7 +374,10 @@ fn main() -> Result<()> {
                     if index < discord_members.len() {
                         let member = &mut discord_members[index];
                         let now_muted = value > 0;
-                        debug!("Discord button {}: {} muted={}", index, member.nick, now_muted);
+                        debug!(
+                            "Discord button {}: {} muted={}",
+                            index, member.nick, now_muted
+                        );
                         if now_muted != member.muted {
                             let _ = handle.cmd_tx.send(discord::Command::SetMute {
                                 user_id: member.user_id.clone(),
@@ -404,8 +440,14 @@ fn main() -> Result<()> {
                 // Within each tier, honour saved priority (lower = first).
                 fresh.sort_by(|a, b| {
                     a.activity_key().cmp(&b.activity_key()).then_with(|| {
-                        let pa = config.ts3_user(&a.nick).and_then(|u| u.priority).unwrap_or(100);
-                        let pb = config.ts3_user(&b.nick).and_then(|u| u.priority).unwrap_or(100);
+                        let pa = config
+                            .ts3_user(&a.nick)
+                            .and_then(|u| u.priority)
+                            .unwrap_or(100);
+                        let pb = config
+                            .ts3_user(&b.nick)
+                            .and_then(|u| u.priority)
+                            .unwrap_or(100);
                         pa.cmp(&pb)
                     })
                 });
@@ -414,7 +456,11 @@ fn main() -> Result<()> {
                 let new_ids: Vec<u16> = fresh.iter().map(|m| m.client_id).collect();
                 if old_ids != new_ids {
                     let prev_len = ts3_members.len();
-                    info!("TS3 members changed: {} -> {} members", prev_len, fresh.len());
+                    info!(
+                        "TS3 members changed: {} -> {} members",
+                        prev_len,
+                        fresh.len()
+                    );
                     if let Err(e) = apply_ts3_config(&mut dev, &fresh, prev_len, &config) {
                         warn!("Failed to configure TeamSpeak page: {}", e);
                     }
@@ -437,23 +483,36 @@ fn main() -> Result<()> {
                     a.activity_key().cmp(&b.activity_key()).then_with(|| {
                         let default_a = if a.streaming { 50 } else { 100 };
                         let default_b = if b.streaming { 50 } else { 100 };
-                        let pa = config.discord_user(&a.nick).and_then(|u| u.priority).unwrap_or(default_a);
-                        let pb = config.discord_user(&b.nick).and_then(|u| u.priority).unwrap_or(default_b);
+                        let pa = config
+                            .discord_user(&a.nick)
+                            .and_then(|u| u.priority)
+                            .unwrap_or(default_a);
+                        let pb = config
+                            .discord_user(&b.nick)
+                            .and_then(|u| u.priority)
+                            .unwrap_or(default_b);
                         pa.cmp(&pb)
                     })
                 });
                 let fresh: Vec<_> = members.into_iter().take(midi::NUM_CONTROLS).collect();
-                let old_ids: Vec<&str> = discord_members.iter().map(|m| m.user_id.as_str()).collect();
+                let old_ids: Vec<&str> =
+                    discord_members.iter().map(|m| m.user_id.as_str()).collect();
                 let new_ids: Vec<&str> = fresh.iter().map(|m| m.user_id.as_str()).collect();
 
                 // Detect display-relevant changes: member list, streaming status, or game name
-                let display_changed = old_ids != new_ids || fresh.iter().zip(discord_members.iter()).any(|(n, o)| {
-                    n.streaming != o.streaming || n.game_name != o.game_name
-                });
+                let display_changed = old_ids != new_ids
+                    || fresh
+                        .iter()
+                        .zip(discord_members.iter())
+                        .any(|(n, o)| n.streaming != o.streaming || n.game_name != o.game_name);
 
                 if display_changed {
                     let prev_len = discord_members.len();
-                    info!("Discord members changed: {} -> {} members", prev_len, fresh.len());
+                    info!(
+                        "Discord members changed: {} -> {} members",
+                        prev_len,
+                        fresh.len()
+                    );
                     if let Err(e) = apply_discord_config(&mut dev, &fresh, prev_len, &config) {
                         warn!("Failed to configure Discord page: {}", e);
                     }
@@ -475,18 +534,28 @@ fn main() -> Result<()> {
             info!("Config file changed, reloading...");
             config = config::Config::load();
             // Rescan PipeWire streams immediately with the new config
-            if let Err(e) = rescan_streams(&mut dev, &mut assigned_streams, &mut linked_child_ids, &mut midi_out, &config, &volume_memory) {
+            if let Err(e) = rescan_streams(
+                &mut dev,
+                &mut assigned_streams,
+                &mut linked_child_ids,
+                &mut midi_out,
+                &config,
+                &volume_memory,
+            ) {
                 warn!("Stream rescan after config reload failed: {}", e);
             }
             last_scan = Instant::now(); // don't double-rescan below
             // Reapply Discord/TS3 display config immediately (colors, priority order)
             if !discord_members.is_empty() {
-                if let Err(e) = apply_discord_config(&mut dev, &discord_members, discord_members.len(), &config) {
+                if let Err(e) =
+                    apply_discord_config(&mut dev, &discord_members, discord_members.len(), &config)
+                {
                     warn!("Failed to reapply Discord config: {}", e);
                 }
             }
             if !ts3_members.is_empty() {
-                if let Err(e) = apply_ts3_config(&mut dev, &ts3_members, ts3_members.len(), &config) {
+                if let Err(e) = apply_ts3_config(&mut dev, &ts3_members, ts3_members.len(), &config)
+                {
                     warn!("Failed to reapply TS3 config: {}", e);
                 }
             }
@@ -527,11 +596,18 @@ fn main() -> Result<()> {
 
 // ---- Page 1: PipeWire stream config ----
 
-fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStream], prev_count: usize) -> Result<()> {
+fn apply_stream_config(
+    dev: &mut protocol::Device,
+    streams: &[pipewire::AudioStream],
+    prev_count: usize,
+) -> Result<()> {
     dev.start_config_update()?;
     for (i, stream) in streams.iter().enumerate() {
-        info!("Knob {}: {} (id={}, vol={:.0}%{})",
-            i + 1, stream.app_name, stream.id,
+        info!(
+            "Knob {}: {} (id={}, vol={:.0}%{})",
+            i + 1,
+            stream.app_name,
+            stream.id,
             stream.volume * 100.0,
             if stream.muted { " MUTED" } else { "" }
         );
@@ -547,7 +623,10 @@ fn apply_stream_config(dev: &mut protocol::Device, streams: &[pipewire::AudioStr
     Ok(())
 }
 
-fn sync_midi_state(midi_out: &mut midir::MidiOutputConnection, streams: &[pipewire::AudioStream]) -> Result<()> {
+fn sync_midi_state(
+    midi_out: &mut midir::MidiOutputConnection,
+    streams: &[pipewire::AudioStream],
+) -> Result<()> {
     for (i, stream) in streams.iter().enumerate() {
         let cc_value = volume_to_cc(stream.volume);
         midi::send_knob_value(midi_out, i, cc_value)?;
@@ -579,8 +658,12 @@ fn rescan_streams(
             if is_new_id {
                 if let Some(&(vol, muted)) = volume_memory.get(&stream.app_name) {
                     if (stream.volume - vol).abs() > 0.005 || stream.muted != muted {
-                        info!("Restoring volume for {} -> {:.0}%{}", stream.app_name, vol * 100.0,
-                            if muted { " MUTED" } else { "" });
+                        info!(
+                            "Restoring volume for {} -> {:.0}%{}",
+                            stream.app_name,
+                            vol * 100.0,
+                            if muted { " MUTED" } else { "" }
+                        );
                         let _ = pipewire::set_volume(stream.id, vol);
                         if muted != stream.muted {
                             let _ = pipewire::toggle_mute(stream.id);
@@ -602,18 +685,24 @@ fn rescan_streams(
     let mut display_changed = false;
     for (i, (old, new)) in assigned.iter().zip(fresh.iter()).enumerate() {
         let knob_changed = old.app_name != new.app_name || old.color_scheme != new.color_scheme;
-        let btn_changed  = old.media_name != new.media_name || old.accent_color != new.accent_color;
+        let btn_changed = old.media_name != new.media_name || old.accent_color != new.accent_color;
         if knob_changed || btn_changed {
             if !display_changed {
                 dev.start_config_update()?;
                 display_changed = true;
             }
             if knob_changed {
-                debug!("Stream {} name/color changed: {:?} -> {:?}", i, old.app_name, new.app_name);
+                debug!(
+                    "Stream {} name/color changed: {:?} -> {:?}",
+                    i, old.app_name, new.app_name
+                );
                 dev.send_midi_knob_config(&make_knob_config(i, new))?;
             }
             if btn_changed {
-                debug!("Stream {} media_name changed: {:?} -> {:?}", i, old.media_name, new.media_name);
+                debug!(
+                    "Stream {} media_name changed: {:?} -> {:?}",
+                    i, old.media_name, new.media_name
+                );
                 dev.send_midi_button_config(&make_button_config(i, new))?;
             }
         }
@@ -626,7 +715,10 @@ fn rescan_streams(
     for (i, (old, new)) in assigned.iter_mut().zip(fresh.iter()).enumerate() {
         let vol_delta = (old.volume - new.volume).abs();
         if vol_delta > 0.005 {
-            debug!("Stream {} volume drifted: {:.2} -> {:.2}", i, old.volume, new.volume);
+            debug!(
+                "Stream {} volume drifted: {:.2} -> {:.2}",
+                i, old.volume, new.volume
+            );
             midi::send_knob_value(midi_out, i, volume_to_cc(new.volume))?;
             old.volume = new.volume;
         }
@@ -635,10 +727,10 @@ fn rescan_streams(
             midi::send_button_value(midi_out, i, if new.muted { 127 } else { 0 })?;
             old.muted = new.muted;
         }
-        old.app_name     = new.app_name.clone();
+        old.app_name = new.app_name.clone();
         old.color_scheme = new.color_scheme;
         old.accent_color = new.accent_color;
-        old.media_name   = new.media_name.clone();
+        old.media_name = new.media_name.clone();
     }
 
     // Always update linked children map (may change due to config reload)
@@ -648,12 +740,16 @@ fn rescan_streams(
 }
 
 fn pick_color_from_name(name: &str) -> u8 {
-    let hash = name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    let hash = name
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     COLOR_POOL[(hash as usize) % COLOR_POOL.len()]
 }
 
 fn pick_color(stream: &pipewire::AudioStream) -> u8 {
-    stream.color_scheme.unwrap_or_else(|| pick_color_from_name(&stream.app_name))
+    stream
+        .color_scheme
+        .unwrap_or_else(|| pick_color_from_name(&stream.app_name))
 }
 
 fn make_knob_config(i: usize, stream: &pipewire::AudioStream) -> protocol::MidiKnobConfig {
@@ -681,7 +777,8 @@ fn make_button_config(i: usize, stream: &pipewire::AudioStream) -> protocol::Mid
     let control_name = stream.media_name.clone().unwrap_or_default();
     // accent_color = explicit override → else knob color → else black/unlit
     let color = if has_detail {
-        stream.accent_color
+        stream
+            .accent_color
             .or(stream.color_scheme)
             .unwrap_or_else(|| pick_color_from_name(&stream.app_name))
     } else {
@@ -709,15 +806,27 @@ fn make_button_config(i: usize, stream: &pipewire::AudioStream) -> protocol::Mid
 
 // ---- Page 2: Discord voice config ----
 
-fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMember], prev_count: usize, config: &config::Config) -> Result<()> {
+fn apply_discord_config(
+    dev: &mut protocol::Device,
+    members: &[discord::VoiceMember],
+    prev_count: usize,
+    config: &config::Config,
+) -> Result<()> {
     dev.start_config_update()?;
     for (i, member) in members.iter().enumerate() {
         let nick = pipewire::truncate_to_chars(&member.nick, 12);
-        let color = config.discord_user(&member.nick)
+        let color = config
+            .discord_user(&member.nick)
             .and_then(|u| u.color)
             .unwrap_or_else(|| pick_color_from_name(&member.nick));
 
-        info!("Discord knob {}: {} (vol={}, muted={})", i + 1, nick, member.volume, member.muted);
+        info!(
+            "Discord knob {}: {} (vol={}, muted={})",
+            i + 1,
+            nick,
+            member.volume,
+            member.muted
+        );
 
         dev.send_midi_knob_config(&protocol::MidiKnobConfig {
             setup_index: 1,
@@ -739,7 +848,11 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
 
         // Show game name on button for streaming members, blank otherwise
         let (btn_name, btn_color) = if member.streaming {
-            let name = member.game_name.as_deref().unwrap_or("Streaming").to_string();
+            let name = member
+                .game_name
+                .as_deref()
+                .unwrap_or("Streaming")
+                .to_string();
             (name, color) // match knob color
         } else {
             (String::new(), 70) // black/unlit
@@ -771,7 +884,10 @@ fn apply_discord_config(dev: &mut protocol::Device, members: &[discord::VoiceMem
     Ok(())
 }
 
-fn sync_discord_midi_state(midi_out: &mut midir::MidiOutputConnection, members: &[discord::VoiceMember]) -> Result<()> {
+fn sync_discord_midi_state(
+    midi_out: &mut midir::MidiOutputConnection,
+    members: &[discord::VoiceMember],
+) -> Result<()> {
     for (i, member) in members.iter().enumerate() {
         let cc_value = discord_volume_to_cc(member.volume);
         midi::send_discord_knob_value(midi_out, i, cc_value)?;
@@ -782,15 +898,27 @@ fn sync_discord_midi_state(midi_out: &mut midir::MidiOutputConnection, members: 
 
 // ---- Page 3: TeamSpeak voice config ----
 
-fn apply_ts3_config(dev: &mut protocol::Device, members: &[teamspeak::TsMember], prev_count: usize, config: &config::Config) -> Result<()> {
+fn apply_ts3_config(
+    dev: &mut protocol::Device,
+    members: &[teamspeak::TsMember],
+    prev_count: usize,
+    config: &config::Config,
+) -> Result<()> {
     dev.start_config_update()?;
     for (i, member) in members.iter().enumerate() {
         let nick = pipewire::truncate_to_chars(&member.nick, 12);
-        let color = config.ts3_user(&member.nick)
+        let color = config
+            .ts3_user(&member.nick)
             .and_then(|u| u.color)
             .unwrap_or_else(|| pick_color_from_name(&member.nick));
 
-        info!("TS3 knob {}: {} (vol={}, muted={})", i + 1, nick, member.volume, member.muted);
+        info!(
+            "TS3 knob {}: {} (vol={}, muted={})",
+            i + 1,
+            nick,
+            member.volume,
+            member.muted
+        );
 
         dev.send_midi_knob_config(&protocol::MidiKnobConfig {
             setup_index: 2,
@@ -836,7 +964,10 @@ fn apply_ts3_config(dev: &mut protocol::Device, members: &[teamspeak::TsMember],
     Ok(())
 }
 
-fn sync_ts3_midi_state(midi_out: &mut midir::MidiOutputConnection, members: &[teamspeak::TsMember]) -> Result<()> {
+fn sync_ts3_midi_state(
+    midi_out: &mut midir::MidiOutputConnection,
+    members: &[teamspeak::TsMember],
+) -> Result<()> {
     for (i, member) in members.iter().enumerate() {
         let cc_value = discord_volume_to_cc(member.volume); // same 0-200 scale
         midi::send_ts3_knob_value(midi_out, i, cc_value)?;
@@ -882,9 +1013,19 @@ fn write_member_state<T: HasNick>(filename: &str, members: &[T]) {
     }
 }
 
-trait HasNick { fn nick(&self) -> &str; }
-impl HasNick for discord::VoiceMember  { fn nick(&self) -> &str { &self.nick } }
-impl HasNick for teamspeak::TsMember   { fn nick(&self) -> &str { &self.nick } }
+trait HasNick {
+    fn nick(&self) -> &str;
+}
+impl HasNick for discord::VoiceMember {
+    fn nick(&self) -> &str {
+        &self.nick
+    }
+}
+impl HasNick for teamspeak::TsMember {
+    fn nick(&self) -> &str {
+        &self.nick
+    }
+}
 
 fn find_roto_control_port() -> Option<String> {
     if let Ok(ports) = serialport::available_ports() {
@@ -923,9 +1064,13 @@ fn find_roto_control_port() -> Option<String> {
                 let mut p = dev_path.as_path();
                 loop {
                     let vid = std::fs::read_to_string(p.join("idVendor"))
-                        .unwrap_or_default().trim().to_lowercase();
+                        .unwrap_or_default()
+                        .trim()
+                        .to_lowercase();
                     let pid = std::fs::read_to_string(p.join("idProduct"))
-                        .unwrap_or_default().trim().to_lowercase();
+                        .unwrap_or_default()
+                        .trim()
+                        .to_lowercase();
                     if vid == "2e8a" && pid == "f010" {
                         found.push(format!("/dev/{}", name));
                         break;

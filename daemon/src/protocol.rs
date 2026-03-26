@@ -6,7 +6,7 @@
 //!
 //! Status 0x00 = OK, anything else is an error code.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use log::debug;
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -161,7 +161,11 @@ impl Device {
 
         debug!(
             "TX: {}",
-            packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+            packet
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         self.port.write_all(&packet)?;
         self.port.flush()?;
@@ -170,20 +174,28 @@ impl Device {
         // The device can send notifications (e.g. setup changes) at any time.
         let mut header = [0u8; 1];
         loop {
-            self.port.read_exact(&mut header).context("Reading response header")?;
+            self.port
+                .read_exact(&mut header)
+                .context("Reading response header")?;
             if header[0] == MSG_RESPONSE {
                 break;
             }
             if header[0] == MSG_COMMAND {
                 // Unsolicited device notification — read its header to know the length, then skip
                 let mut notif_hdr = [0u8; 4]; // group, subcommand, len_hi, len_lo
-                self.port.read_exact(&mut notif_hdr).context("Reading unsolicited notification header")?;
+                self.port
+                    .read_exact(&mut notif_hdr)
+                    .context("Reading unsolicited notification header")?;
                 let notif_len = ((notif_hdr[2] as usize) << 8) | (notif_hdr[3] as usize);
-                debug!("Skipping unsolicited device message (0x5A): group=0x{:02x} sub=0x{:02x} len={}",
-                    notif_hdr[0], notif_hdr[1], notif_len);
+                debug!(
+                    "Skipping unsolicited device message (0x5A): group=0x{:02x} sub=0x{:02x} len={}",
+                    notif_hdr[0], notif_hdr[1], notif_len
+                );
                 if notif_len > 0 {
                     let mut discard = vec![0u8; notif_len];
-                    self.port.read_exact(&mut discard).context("Draining unsolicited notification data")?;
+                    self.port
+                        .read_exact(&mut discard)
+                        .context("Draining unsolicited notification data")?;
                 }
                 continue;
             }
@@ -192,7 +204,9 @@ impl Device {
 
         // Read status byte
         let mut status = [0u8; 1];
-        self.port.read_exact(&mut status).context("Reading response status")?;
+        self.port
+            .read_exact(&mut status)
+            .context("Reading response status")?;
 
         if status[0] != MSG_RESPONSE_OK && status[0] != MSG_RESPONSE_UNCONFIGURED {
             bail!("Device returned error status: 0x{:02x}", status[0]);
@@ -219,7 +233,11 @@ impl Device {
 
         debug!(
             "RX: a5 00 {}",
-            response_data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+            response_data
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
 
         Ok(response_data)
@@ -272,7 +290,11 @@ impl Device {
     }
 
     pub fn set_mode(&mut self, mode: Mode, first_control_index: u8) -> Result<()> {
-        self.send_command(GENERAL, GENERAL_SET_ATARI_MODE, &[mode.to_index(), first_control_index])?;
+        self.send_command(
+            GENERAL,
+            GENERAL_SET_ATARI_MODE,
+            &[mode.to_index(), first_control_index],
+        )?;
         Ok(())
     }
 
