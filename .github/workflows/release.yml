@@ -71,7 +71,8 @@ jobs:
             libx11-dev \
             libxcursor-dev \
             libxrandr-dev \
-            libxi-dev
+            libxi-dev \
+            patchelf
 
       - name: Install Rust toolchain
         if: steps.tag_check.outputs.exists == 'false'
@@ -87,21 +88,15 @@ jobs:
           cp daemon/target/release/proto-control \
             "proto-control-${{ steps.version.outputs.version }}-linux-x86_64"
 
-      # ── Source tarball ────────────────────────────────────────────────────
-      - name: Create source tarball
+      # ── Build & stage TS3 plugin ─────────────────────────────────────────
+      - name: Build TS3 plugin
         if: steps.tag_check.outputs.exists == 'false'
-        run: |
-          git archive \
-            --format=tar.gz \
-            --prefix="proto-control-${{ steps.version.outputs.version }}/" \
-            HEAD \
-            > "proto-control-${{ steps.version.outputs.version }}-source.tar.gz"
+        run: make -C ts3plugin
 
-      # ── Stage TS3 plugin ──────────────────────────────────────────────────
       - name: Stage TS3 plugin
         if: steps.tag_check.outputs.exists == 'false'
         run: |
-          cp ts3plugin/rotocontrol_ts3_linux_amd64.so \
+          cp ts3plugin/protocontrol_ts3_linux_amd64.so \
             "proto-control-ts3-plugin_linux_amd64.so"
 
       # ── Create GitHub Release ─────────────────────────────────────────────
@@ -116,4 +111,3 @@ jobs:
             proto-control-${{ steps.version.outputs.version }}-linux-x86_64
             proto-control-${{ steps.version.outputs.version }}-linux-x86_64-nix
             proto-control-ts3-plugin_linux_amd64.so
-            proto-control-${{ steps.version.outputs.version }}-source.tar.gz
