@@ -12,6 +12,7 @@ use std::thread;
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub id: u32,
+    pub pid: Option<u32>,
     pub binary: String,
     pub app_id: String,
     pub raw_name: String,       // PipeWire reported name before any override
@@ -48,6 +49,8 @@ struct PwNodeProps {
     portal_app_id: Option<String>,
     #[serde(rename = "media.name")]
     media_name: Option<String>,
+    #[serde(rename = "application.process.id")]
+    process_id: Option<u32>,
 }
 
 /// List all audio output streams currently connected in PipeWire.
@@ -88,6 +91,7 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
             .or_else(|| props.node_name.clone())
             .unwrap_or_else(|| format!("Stream {}", node.id));
 
+        let pid = props.process_id;
         let binary = props.process_binary.as_deref().unwrap_or("");
         let app_id = props.portal_app_id.as_deref().unwrap_or("");
         let resolved = config.resolve(binary, app_id, &default_name);
@@ -116,6 +120,7 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 
         streams.push(AudioStream {
             id: node.id,
+            pid,
             binary: binary.to_string(),
             app_id: app_id.to_string(),
             raw_name,
@@ -187,6 +192,32 @@ pub fn toggle_mute(id: u32) -> Result<()> {
         .output()
         .context("Failed to toggle mute")?;
     Ok(())
+}
+
+/// Read the parent PID of a process from /proc.
+pub fn get_parent_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    for line in status.lines() {
+        if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
+            return ppid_str.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Check if `child_pid` is a descendant of `parent_pid` in the process tree.
+/// Walks up to 8 levels to avoid traversing to PID 1.
+pub fn is_descendant(child_pid: u32, parent_pid: u32) -> bool {
+    let mut current = child_pid;
+    for _ in 0..8 {
+        match get_parent_pid(current) {
+            Some(ppid) if ppid == parent_pid => return true,
+            Some(ppid) if ppid <= 1 => return false,
+            Some(ppid) => current = ppid,
+            None => return false,
+        }
+    }
+    false
 }
 
 /// Watch for PipeWire sink-input events via `pactl subscribe`.

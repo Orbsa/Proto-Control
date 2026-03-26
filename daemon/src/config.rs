@@ -70,6 +70,10 @@ pub struct StreamOverride {
     /// If true, this stream is hidden from the device and daemon.
     #[serde(default)]
     pub ignored: bool,
+    /// If true, child process streams are linked to this parent and hidden
+    /// from the control surface. Volume/mute changes propagate to children.
+    #[serde(default)]
+    pub auto_link_children: bool,
 }
 
 /// Per-user settings for Discord or TeamSpeak.
@@ -102,6 +106,7 @@ pub struct ResolvedStream {
     pub color: Option<u8>,
     pub accent_color: Option<u8>,
     pub ignored: bool,
+    pub auto_link_children: bool,
 }
 
 impl Config {
@@ -157,6 +162,7 @@ impl Config {
                     color: entry.color,
                     accent_color: entry.accent_color,
                     ignored: entry.ignored,
+                    auto_link_children: entry.auto_link_children,
                 };
             }
         }
@@ -170,6 +176,7 @@ impl Config {
                     color: d.color,
                     accent_color: None,
                     ignored: false,
+                    auto_link_children: false,
                 };
             }
         }
@@ -180,6 +187,7 @@ impl Config {
             color: None,
             accent_color: None,
             ignored: false,
+            auto_link_children: false,
         }
     }
 

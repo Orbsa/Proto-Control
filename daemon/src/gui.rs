@@ -85,6 +85,12 @@ struct StreamRow {
     use_mpris: bool,
     /// Preserved custom mpris player name (None = use binary name as default).
     mpris_player: Option<String>,
+    /// PID of the process (from live PipeWire data).
+    pid: Option<u32>,
+    /// Key of the parent stream (binary/app_id) if this is a child process.
+    parent_key: Option<String>,
+    /// Whether to auto-link child process streams to this parent.
+    auto_link_children: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +121,9 @@ struct App {
     discord_add_sel: Option<String>,
     ts3_add_sel: Option<String>,
     status: String,
+    hide_offline: bool,
+    /// Keys of parent streams whose child tree is expanded.
+    expanded_streams: std::collections::HashSet<String>,
 }
 
 // ---- Messages -------------------------------------------------------------
@@ -128,7 +137,10 @@ enum Message {
     StreamAccentColorSelected(usize, Option<u8>),
     StreamIgnoreToggled(usize, bool),
     StreamMprisToggled(usize, bool),
+    StreamAutoLinkToggled(usize, bool),
+    ToggleStreamExpand(String),
     RemoveStream(usize),
+    SetHideOffline(bool),
     Refresh,
     // Discord users
     AddDiscordUser,
@@ -159,6 +171,7 @@ enum Message {
 pub fn run() -> iced::Result {
     iced::application("Proto-Control Settings", update, view)
         .window_size((780.0, 580.0))
+        .scale_factor(|_| 0.8)
         .theme(|_| Theme::Dark)
         .run_with(init)
 }
@@ -183,6 +196,8 @@ fn init() -> (App, Task<Message>) {
         discord_add_sel: None,
         ts3_add_sel: None,
         status: String::new(),
+        hide_offline: false,
+        expanded_streams: std::collections::HashSet::new(),
     }, Task::none())
 }
 
@@ -193,24 +208,40 @@ fn read_member_state(filename: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Unique key for a stream row. For sub-streams that share a binary but have
+/// different application names, includes the raw_name to disambiguate.
+fn stream_row_key(row: &StreamRow) -> String {
+    if !row.binary.is_empty() {
+        // Include raw_name to distinguish sub-streams from the same binary
+        format!("{}:{}", row.binary, row.raw_name)
+    } else if !row.app_id.is_empty() {
+        row.app_id.clone()
+    } else {
+        row.raw_name.clone()
+    }
+}
+
 fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> Vec<StreamRow> {
     let mut rows = Vec::new();
+    // Dedup by (binary+raw_name) so sub-streams from the same process show separately
     let mut seen = std::collections::HashSet::new();
 
     for stream in pw_streams {
-        let key = if !stream.binary.is_empty() {
-            stream.binary.clone()
+        let dedup_key = format!("{}:{}", stream.binary, stream.raw_name);
+        if dedup_key == ":" { continue; }
+        if !seen.insert(dedup_key) { continue; }
+
+        let config_key = if !stream.binary.is_empty() {
+            &stream.binary
         } else if !stream.app_id.is_empty() {
-            stream.app_id.clone()
+            &stream.app_id
         } else {
-            stream.raw_name.clone()
+            &stream.raw_name
         };
-        if key.is_empty() { continue; }
-        if !seen.insert(key.clone()) { continue; }
 
         let ov = config.streams.iter().find(|o| {
-            o.binary.as_deref() == Some(&key) || o.app_id.as_deref() == Some(&key)
-                || o.name == key
+            o.binary.as_deref() == Some(config_key) || o.app_id.as_deref() == Some(config_key)
+                || o.name == *config_key
         });
         // mpris_player: prefer user config, fall back to built-in default
         let resolved = config.resolve(&stream.binary, &stream.app_id, &stream.raw_name);
@@ -227,16 +258,22 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
             has_media_name: stream.media_name.is_some(),
             use_mpris: mpris_player.is_some(),
             mpris_player,
+            pid: stream.pid,
+            parent_key: None, // filled in below
+            auto_link_children: ov.map(|o| o.auto_link_children).unwrap_or(false),
         });
     }
 
     // Saved overrides for apps not currently running
+    let seen_keys: std::collections::HashSet<String> = rows.iter()
+        .map(|r| stream_row_key(r))
+        .collect();
     for ov in &config.streams {
         let key = ov.binary.as_deref()
             .or(ov.app_id.as_deref())
             .unwrap_or(&ov.name)
             .to_string();
-        if key.is_empty() || seen.contains(&key) { continue; }
+        if key.is_empty() || seen_keys.contains(&key) { continue; }
         rows.push(StreamRow {
             binary: ov.binary.clone().unwrap_or_default(),
             app_id: ov.app_id.clone().unwrap_or_default(),
@@ -249,8 +286,43 @@ fn build_stream_rows(config: &Config, pw_streams: &[pipewire::AudioStream]) -> V
             has_media_name: false,
             use_mpris: ov.mpris_player.is_some(),
             mpris_player: ov.mpris_player.clone(),
+            pid: None,
+            parent_key: None,
+            auto_link_children: ov.auto_link_children,
         });
     }
+
+    // Detect sub-streams: streams sharing a PID or with a parent/child PID
+    // relationship are grouped. The first stream seen for a PID is the "parent".
+    // Build PID -> first row key mapping.
+    let mut pid_to_parent_key: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for row in &rows {
+        if let Some(pid) = row.pid {
+            pid_to_parent_key.entry(pid).or_insert_with(|| stream_row_key(row));
+        }
+    }
+
+    for row in &mut rows {
+        if let Some(pid) = row.pid {
+            let my_key = stream_row_key(row);
+            // Same-PID grouping: if another row with this PID was seen first, it's the parent
+            if let Some(parent_key) = pid_to_parent_key.get(&pid) {
+                if *parent_key != my_key {
+                    row.parent_key = Some(parent_key.clone());
+                    continue;
+                }
+            }
+            // Process ancestry: check if our PID is a child of another stream's PID
+            for (&other_pid, parent_key) in &pid_to_parent_key {
+                if other_pid == pid { continue; }
+                if pipewire::is_descendant(pid, other_pid) {
+                    row.parent_key = Some(parent_key.clone());
+                    break;
+                }
+            }
+        }
+    }
+
     rows
 }
 
@@ -261,11 +333,18 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
         Message::TabSelected(t) => { app.tab = t; }
 
         // PipeWire
+        Message::SetHideOffline(v) => { app.hide_offline = v; }
         Message::StreamNameChanged(i, s) => { if let Some(r) = app.streams.get_mut(i) { r.name_input = s; } }
         Message::StreamColorSelected(i, c) => { if let Some(r) = app.streams.get_mut(i) { r.color = c; } }
         Message::StreamAccentColorSelected(i, c) => { if let Some(r) = app.streams.get_mut(i) { r.accent_color = c; } }
         Message::StreamIgnoreToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.ignored = v; } }
         Message::StreamMprisToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.use_mpris = v; } }
+        Message::StreamAutoLinkToggled(i, v) => { if let Some(r) = app.streams.get_mut(i) { r.auto_link_children = v; } }
+        Message::ToggleStreamExpand(key) => {
+            if !app.expanded_streams.remove(&key) {
+                app.expanded_streams.insert(key);
+            }
+        }
         Message::RemoveStream(i) => { if i < app.streams.len() { app.streams.remove(i); } }
         Message::Refresh => {
             let pw = pipewire::list_streams(&app.config).unwrap_or_default();
@@ -327,7 +406,8 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                     || row.color.is_some()
                     || row.accent_color.is_some()
                     || row.ignored
-                    || row.use_mpris;
+                    || row.use_mpris
+                    || row.auto_link_children;
                 if !has_override { continue; }
 
                 let binary = if row.binary.is_empty() { None } else { Some(row.binary.clone()) };
@@ -349,6 +429,7 @@ fn update(app: &mut App, msg: Message) -> Task<Message> {
                     color: row.color,
                     accent_color: row.accent_color,
                     ignored: row.ignored,
+                    auto_link_children: row.auto_link_children,
                 });
             }
 
@@ -428,6 +509,10 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
     let header = row![
         text("PipeWire Streams").size(16),
         iced::widget::Space::with_width(Length::Fill),
+        checkbox("Hide offline", app.hide_offline)
+            .on_toggle(Message::SetHideOffline)
+            .size(14)
+            .text_size(12),
         checkbox("Enabled", app.config.pipewire_enabled)
             .on_toggle(Message::SetPipewireEnabled)
             .size(14)
@@ -445,29 +530,72 @@ fn view_pipewire(app: &App) -> Element<'_, Message> {
             text("No streams found. Play some audio and click Refresh.").into()
         );
     }
+
+    // Check which streams have children (for showing auto-link toggle)
+    let has_children: std::collections::HashSet<String> = app.streams.iter()
+        .filter_map(|s| s.parent_key.clone())
+        .collect();
+
+    // Render root streams first, then their children indented below
     for (i, stream) in app.streams.iter().enumerate() {
-        children.push(stream_card(i, stream));
+        if stream.parent_key.is_some() { continue; } // rendered under parent
+        if app.hide_offline && !stream.is_live { continue; }
+        let key = stream_row_key(stream);
+        let is_parent = has_children.contains(&key);
+        let is_expanded = app.expanded_streams.contains(&key);
+        children.push(stream_card(i, stream, false, is_parent, is_expanded, false));
+
+        // Render children of this stream (only when expanded)
+        if is_parent && is_expanded {
+            for (j, child) in app.streams.iter().enumerate() {
+                if child.parent_key.as_deref() == Some(&key) {
+                    if app.hide_offline && !child.is_live { continue; }
+                    children.push(stream_card(j, child, true, false, false, stream.auto_link_children));
+                }
+            }
+        }
     }
 
     Column::with_children(children).spacing(6).padding(8).width(Length::Fill).into()
 }
 
-fn stream_card(i: usize, stream: &StreamRow) -> Element<'_, Message> {
-    let key = if !stream.binary.is_empty() { &stream.binary }
+fn stream_card(i: usize, stream: &StreamRow, is_child: bool, is_parent: bool, is_expanded: bool, is_linked: bool) -> Element<'_, Message> {
+    // Display label: show raw_name for readability, fall back to binary/app_id
+    let display_label = if !stream.raw_name.is_empty() { &stream.raw_name }
+        else if !stream.binary.is_empty() { &stream.binary }
         else if !stream.app_id.is_empty() { &stream.app_id }
-        else { &stream.raw_name };
+        else { "?" };
     let (status_label, status_color) = if stream.is_live {
         ("live", Color::from_rgb8(0x4C, 0xAF, 0x50))
     } else {
         ("offline", Color::from_rgb8(0x80, 0x80, 0x80))
     };
 
-    let header = row![
-        text(key).size(13),
-        text(status_label).size(11).color(status_color),
-    ]
-    .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
+    let mut header_children: Vec<Element<Message>> = Vec::new();
+    // Expand/collapse toggle for parent streams
+    if is_parent {
+        let arrow = if is_expanded { "▼" } else { "▶" };
+        let toggle_key = stream_row_key(stream);
+        header_children.push(
+            button(text(arrow).size(11))
+                .on_press(Message::ToggleStreamExpand(toggle_key))
+                .style(button::text)
+                .padding(Padding { top: 0.0, right: 2.0, bottom: 0.0, left: 0.0 })
+                .into()
+        );
+    } else if is_child {
+        header_children.push(text("  └").size(13).color(Color::from_rgb8(0x60, 0x60, 0x60)).into());
+    }
+    header_children.push(text(display_label).size(13).into());
+    header_children.push(text(status_label).size(11).color(status_color).into());
+    if is_linked {
+        header_children.push(
+            text("(linked)").size(11).color(Color::from_rgb8(0x5C, 0xFF, 0xE8)).into()
+        );
+    }
+    let header = Row::with_children(header_children)
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center);
 
     // Top colour row
     let top_color_row = row![
@@ -499,27 +627,44 @@ fn stream_card(i: usize, stream: &StreamRow) -> Element<'_, Message> {
         None
     };
 
-    let name_row = row![
-        text("Name:").size(12),
+    let mut name_row_children: Vec<Element<Message>> = vec![
+        text("Name:").size(12).into(),
         text_input("Display name", &stream.name_input)
             .on_input(move |s| Message::StreamNameChanged(i, s))
             .width(160)
-            .size(12),
-        iced::widget::Space::with_width(Length::Fill),
+            .size(12)
+            .into(),
+        iced::widget::Space::with_width(Length::Fill).into(),
+    ];
+    // Show auto-link checkbox for parent streams that have children
+    if is_parent {
+        name_row_children.push(
+            checkbox("Auto-link children", stream.auto_link_children)
+                .on_toggle(move |v| Message::StreamAutoLinkToggled(i, v))
+                .size(14)
+                .text_size(12)
+                .into()
+        );
+    }
+    name_row_children.extend([
         checkbox("Track title", stream.use_mpris)
             .on_toggle(move |v| Message::StreamMprisToggled(i, v))
             .size(14)
-            .text_size(12),
+            .text_size(12)
+            .into(),
         checkbox("Ignore", stream.ignored)
             .on_toggle(move |v| Message::StreamIgnoreToggled(i, v))
             .size(14)
-            .text_size(12),
+            .text_size(12)
+            .into(),
         button(text("x").size(11))
             .on_press(Message::RemoveStream(i))
-            .style(button::danger),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
+            .style(button::danger)
+            .into(),
+    ]);
+    let name_row = Row::with_children(name_row_children)
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center);
 
     let mut col_children: Vec<Element<Message>> = vec![
         header.into(),
@@ -530,24 +675,45 @@ fn stream_card(i: usize, stream: &StreamRow) -> Element<'_, Message> {
         col_children.push(ar);
     }
 
-    container(
+    let left_pad = if is_child { 24.0 } else { 0.0 };
+    let border_color_override = if is_child {
+        Color::from_rgb8(0x50, 0x50, 0x60)
+    } else {
+        Color::from_rgb8(0, 0, 0) // placeholder, overridden below
+    };
+    let is_child_copy = is_child;
+
+    let card = container(
         Column::with_children(col_children).spacing(5).width(Length::Fill),
     )
     .padding(Padding::new(8.0))
     .width(Length::Fill)
-    .style(|theme: &Theme| {
+    .style(move |theme: &Theme| {
         let bg = theme.extended_palette().background.weak.color;
+        let border_col = if is_child_copy {
+            border_color_override
+        } else {
+            theme.extended_palette().background.strong.color
+        };
         container::Style {
             background: Some(iced::Background::Color(bg)),
             border: iced::Border {
-                color: theme.extended_palette().background.strong.color,
+                color: border_col,
                 width: 1.0,
                 radius: 4.0.into(),
             },
             ..Default::default()
         }
-    })
-    .into()
+    });
+
+    if is_child {
+        container(card)
+            .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: left_pad })
+            .width(Length::Fill)
+            .into()
+    } else {
+        card.into()
+    }
 }
 
 // ---- Discord tab ----------------------------------------------------------

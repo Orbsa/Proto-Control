@@ -30,6 +30,85 @@ const COLOR_POOL: &[u8] = &[
     14, // #FF3636 red
 ];
 
+/// Partition streams into visible streams and linked child IDs.
+/// Streams whose parent has auto_link_children enabled are removed from the
+/// visible list and their PipeWire node IDs are collected under the parent's
+/// visible index.
+///
+/// Sub-streams are detected by: (1) sharing the same PID (e.g. FMOD inside a
+/// game), or (2) having a child PID of another stream's PID.
+fn partition_linked_streams(
+    all_streams: Vec<pipewire::AudioStream>,
+    config: &config::Config,
+) -> (Vec<pipewire::AudioStream>, HashMap<usize, Vec<u32>>) {
+    // Build PID -> first stream index mapping (the "parent" for same-PID groups)
+    let mut pid_to_first: HashMap<u32, usize> = HashMap::new();
+    for (i, stream) in all_streams.iter().enumerate() {
+        if let Some(pid) = stream.pid {
+            pid_to_first.entry(pid).or_insert(i);
+        }
+    }
+
+    // For each stream, find its parent stream index (if any)
+    let mut parent_of: Vec<Option<usize>> = vec![None; all_streams.len()];
+    for (i, stream) in all_streams.iter().enumerate() {
+        if let Some(pid) = stream.pid {
+            // Same-PID grouping: if another stream with this PID appeared first
+            if let Some(&first) = pid_to_first.get(&pid) {
+                if first != i {
+                    parent_of[i] = Some(first);
+                    continue;
+                }
+            }
+            // Process ancestry: check if our PID is a child of another stream's PID
+            for (&other_pid, &first_idx) in &pid_to_first {
+                if other_pid == pid { continue; }
+                if pipewire::is_descendant(pid, other_pid) {
+                    parent_of[i] = Some(first_idx);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Determine which streams should be linked (hidden from controls)
+    let mut is_linked = vec![false; all_streams.len()];
+    for (i, p_idx) in parent_of.iter().enumerate() {
+        if let Some(j) = p_idx {
+            let parent = &all_streams[*j];
+            let resolved = config.resolve(&parent.binary, &parent.app_id, &parent.raw_name);
+            if resolved.auto_link_children {
+                is_linked[i] = true;
+            }
+        }
+    }
+
+    // Build visible list + map of original index -> visible index
+    let mut visible = Vec::new();
+    let mut orig_to_visible: HashMap<usize, usize> = HashMap::new();
+    let mut linked_ids: HashMap<usize, Vec<u32>> = HashMap::new();
+
+    for (i, stream) in all_streams.iter().enumerate() {
+        if !is_linked[i] {
+            orig_to_visible.insert(i, visible.len());
+            visible.push(stream.clone());
+        }
+    }
+
+    // Map linked children to their parent's visible index
+    for (i, stream) in all_streams.iter().enumerate() {
+        if is_linked[i] {
+            if let Some(parent_orig) = parent_of[i] {
+                if let Some(&parent_vis) = orig_to_visible.get(&parent_orig) {
+                    linked_ids.entry(parent_vis).or_default().push(stream.id);
+                }
+            }
+        }
+    }
+
+    (visible, linked_ids)
+}
+
 fn main() -> Result<()> {
     // Launch the settings GUI if requested
     if std::env::args().any(|a| a == "--settings") {
@@ -70,14 +149,16 @@ fn main() -> Result<()> {
 
     // 3. Load config and enumerate PipeWire streams
     let mut config = config::Config::load();
-    let mut assigned_streams: Vec<pipewire::AudioStream> = if config.pipewire_enabled {
+    let (mut assigned_streams, mut linked_child_ids): (Vec<pipewire::AudioStream>, HashMap<usize, Vec<u32>>) = if config.pipewire_enabled {
         let streams = pipewire::list_streams(&config)?;
-        let num_assigned = streams.len().min(MAX_CONTROLS);
-        info!("Found {} audio streams, assigning {} to knobs", streams.len(), num_assigned);
-        streams.into_iter().take(MAX_CONTROLS).collect()
+        let (visible, linked) = partition_linked_streams(streams, &config);
+        let num_assigned = visible.len().min(MAX_CONTROLS);
+        info!("Found {} visible audio streams (+ {} linked children), assigning {} to knobs",
+            visible.len(), linked.values().map(|v| v.len()).sum::<usize>(), num_assigned);
+        (visible.into_iter().take(MAX_CONTROLS).collect(), linked)
     } else {
         info!("PipeWire integration disabled");
-        vec![]
+        (vec![], HashMap::new())
     };
 
     // 4. Configure page 1 (PipeWire streams)
@@ -207,6 +288,14 @@ fn main() -> Result<()> {
                     }
                     stream.volume = new_volume;
                     volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
+                    // Propagate volume to linked children
+                    if let Some(child_ids) = linked_child_ids.get(&index) {
+                        for &child_id in child_ids {
+                            if let Err(e) = pipewire::set_volume(child_id, new_volume) {
+                                warn!("Failed to set linked child volume (id={}): {}", child_id, e);
+                            }
+                        }
+                    }
                 }
             }
             if let Some(value) = pending_buttons[index].take() {
@@ -220,6 +309,14 @@ fn main() -> Result<()> {
                         }
                         stream.muted = now_muted;
                         volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
+                        // Propagate mute toggle to linked children
+                        if let Some(child_ids) = linked_child_ids.get(&index) {
+                            for &child_id in child_ids {
+                                if let Err(e) = pipewire::toggle_mute(child_id) {
+                                    warn!("Failed to toggle linked child mute (id={}): {}", child_id, e);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -378,7 +475,7 @@ fn main() -> Result<()> {
             info!("Config file changed, reloading...");
             config = config::Config::load();
             // Rescan PipeWire streams immediately with the new config
-            if let Err(e) = rescan_streams(&mut dev, &mut assigned_streams, &mut midi_out, &config, &volume_memory) {
+            if let Err(e) = rescan_streams(&mut dev, &mut assigned_streams, &mut linked_child_ids, &mut midi_out, &config, &volume_memory) {
                 warn!("Stream rescan after config reload failed: {}", e);
             }
             last_scan = Instant::now(); // don't double-rescan below
@@ -404,6 +501,7 @@ fn main() -> Result<()> {
             if let Err(e) = rescan_streams(
                 &mut dev,
                 &mut assigned_streams,
+                &mut linked_child_ids,
                 &mut midi_out,
                 &config,
                 &volume_memory,
@@ -461,12 +559,14 @@ fn sync_midi_state(midi_out: &mut midir::MidiOutputConnection, streams: &[pipewi
 fn rescan_streams(
     dev: &mut protocol::Device,
     assigned: &mut Vec<pipewire::AudioStream>,
+    linked_children: &mut HashMap<usize, Vec<u32>>,
     midi_out: &mut midir::MidiOutputConnection,
     config: &config::Config,
     volume_memory: &HashMap<String, (f64, bool)>,
 ) -> Result<()> {
-    let fresh = pipewire::list_streams(config)?;
-    let mut fresh: Vec<_> = fresh.into_iter().take(MAX_CONTROLS).collect();
+    let all_fresh = pipewire::list_streams(config)?;
+    let (partitioned, new_linked) = partition_linked_streams(all_fresh, config);
+    let mut fresh: Vec<_> = partitioned.into_iter().take(MAX_CONTROLS).collect();
 
     let old_ids: Vec<u32> = assigned.iter().map(|s| s.id).collect();
     let new_ids: Vec<u32> = fresh.iter().map(|s| s.id).collect();
@@ -495,6 +595,7 @@ fn rescan_streams(
         apply_stream_config(dev, &fresh, prev_count)?;
         sync_midi_state(midi_out, &fresh)?;
         *assigned = fresh;
+        *linked_children = new_linked;
         return Ok(());
     }
 
@@ -539,6 +640,9 @@ fn rescan_streams(
         old.accent_color = new.accent_color;
         old.media_name   = new.media_name.clone();
     }
+
+    // Always update linked children map (may change due to config reload)
+    *linked_children = new_linked;
 
     Ok(())
 }
