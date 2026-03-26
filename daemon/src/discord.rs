@@ -476,26 +476,13 @@ fn refresh_token(client_id: &str, client_secret: &str, refresh: &str) -> Option<
 }
 
 fn token_request(body: &str) -> Result<TokenData> {
-    let output = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "https://discord.com/api/oauth2/token",
-            "-H",
-            "Content-Type: application/x-www-form-urlencoded",
-            "-d",
-            body,
-        ])
-        .output()
-        .context("Failed to run curl for Discord token exchange")?;
+    let mut resp = ureq::post("https://discord.com/api/oauth2/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(body)
+        .context("Discord token exchange request failed")?;
 
-    if !output.status.success() {
-        bail!("curl failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    let json: Value =
-        serde_json::from_slice(&output.stdout).context("Failed to parse token response")?;
+    let json: Value = resp.body_mut().read_json()
+        .context("Failed to parse token response")?;
 
     if let Some(err) = json["error"].as_str() {
         bail!("Token exchange error: {}", err);

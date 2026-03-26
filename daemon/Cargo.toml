@@ -1,6 +1,6 @@
 [package]
 name = "proto-control"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 description = "Daemon for the Melbourne Instruments Roto-Control device — PipeWire volume, Discord, and TeamSpeak voice integration"
 license = "MIT"
@@ -21,3 +21,4 @@ png = "0.18"
 log = "0.4"
 env_logger = "0.11"
 iced = { version = "0.13", default-features = false, features = ["tiny-skia", "fira-sans", "auto-detect-theme"] }
+ureq = { version = "3", features = ["json"] }
