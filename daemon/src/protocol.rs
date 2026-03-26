@@ -146,9 +146,9 @@ impl Device {
         Self { port }
     }
 
-    /// Send a command and read the response.
-    /// Returns the response data bytes (after the status byte).
-    fn send_command(&mut self, group: u8, subcommand: u8, data: &[u8]) -> Result<Vec<u8>> {
+    /// Send a raw packet and read through the response header + status byte,
+    /// skipping any unsolicited device notifications. Returns the status byte.
+    fn send_and_read_status(&mut self, group: u8, subcommand: u8, data: &[u8]) -> Result<u8> {
         let len = data.len() as u16;
         let mut packet = vec![
             MSG_COMMAND,
@@ -171,7 +171,6 @@ impl Device {
         self.port.flush()?;
 
         // Read response header byte, skipping any unsolicited device notifications (0x5A).
-        // The device can send notifications (e.g. setup changes) at any time.
         let mut header = [0u8; 1];
         loop {
             self.port
@@ -208,8 +207,16 @@ impl Device {
             .read_exact(&mut status)
             .context("Reading response status")?;
 
-        if status[0] != MSG_RESPONSE_OK && status[0] != MSG_RESPONSE_UNCONFIGURED {
-            bail!("Device returned error status: 0x{:02x}", status[0]);
+        Ok(status[0])
+    }
+
+    /// Send a command and read the full response (status + trailing data).
+    /// Returns the response data bytes (after the status byte).
+    fn send_command(&mut self, group: u8, subcommand: u8, data: &[u8]) -> Result<Vec<u8>> {
+        let status = self.send_and_read_status(group, subcommand, data)?;
+
+        if status != MSG_RESPONSE_OK && status != MSG_RESPONSE_UNCONFIGURED {
+            bail!("Device returned error status: 0x{:02x}", status);
         }
 
         // Read remaining response data with a short drain timeout.
@@ -232,7 +239,8 @@ impl Device {
         self.port.set_timeout(original_timeout)?;
 
         debug!(
-            "RX: a5 00 {}",
+            "RX: a5 {:02x} {}",
+            status,
             response_data
                 .iter()
                 .map(|b| format!("{:02x}", b))
@@ -241,6 +249,16 @@ impl Device {
         );
 
         Ok(response_data)
+    }
+
+    /// Send a command that returns no data beyond the status byte.
+    /// Skips the 100ms drain timeout, making it much faster for bulk operations.
+    fn send_command_fast(&mut self, group: u8, subcommand: u8, data: &[u8]) -> Result<()> {
+        let status = self.send_and_read_status(group, subcommand, data)?;
+        if status != MSG_RESPONSE_OK && status != MSG_RESPONSE_UNCONFIGURED {
+            bail!("Device returned error status: 0x{:02x}", status);
+        }
+        Ok(())
     }
 
     /// Send a command that wraps in START_CONFIG_UPDATE / END_CONFIG_UPDATE.
@@ -253,14 +271,12 @@ impl Device {
 
     /// Begin a config update transaction. Batch multiple configs before calling end_config_update.
     pub fn start_config_update(&mut self) -> Result<()> {
-        self.send_command(GENERAL, GENERAL_START_CONFIG_UPDATE, &[])?;
-        Ok(())
+        self.send_command_fast(GENERAL, GENERAL_START_CONFIG_UPDATE, &[])
     }
 
     /// End a config update transaction.
     pub fn end_config_update(&mut self) -> Result<()> {
-        self.send_command(GENERAL, GENERAL_END_CONFIG_UPDATE, &[])?;
-        Ok(())
+        self.send_command_fast(GENERAL, GENERAL_END_CONFIG_UPDATE, &[])
     }
 
     pub fn get_version(&mut self) -> Result<FirmwareVersion> {
@@ -348,8 +364,7 @@ impl Device {
         for name in &config.step_names {
             payload.extend_from_slice(&to_padded_string(name, NAME_LENGTH));
         }
-        self.send_command(MIDI, MIDI_SET_KNOB_CONTROL_CONFIG, &payload)?;
-        Ok(())
+        self.send_command_fast(MIDI, MIDI_SET_KNOB_CONTROL_CONFIG, &payload)
     }
 
     /// Send button config (raw, no transaction wrapper — use inside a batch).
@@ -375,22 +390,30 @@ impl Device {
         for name in &config.step_names {
             payload.extend_from_slice(&to_padded_string(name, NAME_LENGTH));
         }
-        self.send_command(MIDI, MIDI_SET_SWITCH_CONTROL_CONFIG, &payload)?;
-        Ok(())
+        self.send_command_fast(MIDI, MIDI_SET_SWITCH_CONTROL_CONFIG, &payload)
     }
 
     /// Clear a knob config (raw, no transaction wrapper).
     pub fn send_clear_knob(&mut self, setup_index: u8, control_index: u8) -> Result<()> {
-        let data = [setup_index, 0, control_index];
-        self.send_command(MIDI, MIDI_CLEAR_CONTROL_CONFIG, &data)?;
-        Ok(())
+        self.send_command_fast(MIDI, MIDI_CLEAR_CONTROL_CONFIG, &[setup_index, 0, control_index])
     }
 
     /// Clear a button config (raw, no transaction wrapper).
     pub fn send_clear_button(&mut self, setup_index: u8, control_index: u8) -> Result<()> {
-        let data = [setup_index, 1, control_index];
-        self.send_command(MIDI, MIDI_CLEAR_CONTROL_CONFIG, &data)?;
-        Ok(())
+        self.send_command_fast(MIDI, MIDI_CLEAR_CONTROL_CONFIG, &[setup_index, 1, control_index])
+    }
+
+    /// Clear all 32 controls (knobs + buttons) on all enabled setups.
+    /// Used on startup to wipe stale state from an unclean shutdown.
+    pub fn clear_all(&mut self, setup_count: u8) -> Result<()> {
+        self.start_config_update()?;
+        for setup in 0..setup_count {
+            for i in 0..32u8 {
+                self.send_clear_knob(setup, i)?;
+                self.send_clear_button(setup, i)?;
+            }
+        }
+        self.end_config_update()
     }
 }
 

@@ -155,9 +155,15 @@ fn main() -> Result<()> {
         version.major, version.minor, version.patch, version.commit
     );
 
-    // 2. Switch to MIDI mode and set setup names
+    // 2. Switch to MIDI mode, clear stale state, and set setup names
     info!("Switching to MIDI mode...");
     dev.set_mode(protocol::Mode::Midi, 0)?;
+
+    // Clear all controls across all 3 setups to wipe state from any previous
+    // unclean shutdown. Uses the fast path (no 100ms drain per command).
+    info!("Clearing all controls...");
+    dev.clear_all(3)?;
+
     dev.set_setup_name(0, "PipeWire")?;
 
     // 3. Load config and enumerate PipeWire streams
