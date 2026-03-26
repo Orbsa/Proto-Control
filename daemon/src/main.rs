@@ -114,7 +114,15 @@ fn partition_linked_streams(
 fn main() -> Result<()> {
     // Launch the settings GUI if requested
     if std::env::args().any(|a| a == "--settings") {
-        return gui::run().map_err(|e| anyhow::anyhow!("GUI error: {}", e));
+        // Catch panics from iced (e.g. no display server available)
+        let result = std::panic::catch_unwind(gui::run);
+        return match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("GUI error: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Settings GUI failed to start. Is a display server (Wayland/X11) available?"
+            )),
+        };
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
