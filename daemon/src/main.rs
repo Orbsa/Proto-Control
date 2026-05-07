@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 const MAX_CONTROLS: usize = 32; // 4 pages × 8 controls per setup
 /// Fallback poll interval in case the pactl watcher misses an event.
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// After we restore a slot's volume from `volume_memory`, ignore drift on that
+/// slot for this long. `wpctl set-volume` propagates async through WirePlumber,
+/// so subsequent `pw-dump`s can briefly still report the pre-restore value —
+/// without this window the drift block would yank the encoder back to it.
+const RESTORE_SUPPRESS_WINDOW: Duration = Duration::from_millis(750);
 
 /// Color scheme indices chosen to be visually distinct across the 85-entry palette.
 const COLOR_POOL: &[u8] = &[
@@ -279,6 +284,10 @@ fn main() -> Result<()> {
     for stream in &assigned_streams {
         volume_memory.insert(stream.app_name.clone(), (stream.volume, stream.muted));
     }
+    // Per-slot timestamp of the last volume_memory restore. While within
+    // RESTORE_SUPPRESS_WINDOW, drift detection ignores this slot so that a
+    // not-yet-propagated wpctl change doesn't drag the encoder back.
+    let mut last_restored: [Option<Instant>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
     // Pending latest values per control index (None = no pending change)
     let mut pending_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
     let mut pending_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
@@ -759,6 +768,7 @@ fn main() -> Result<()> {
                 &mut midi_out,
                 &config,
                 &volume_memory,
+                &mut last_restored,
             ) {
                 warn!("Stream rescan after config reload failed: {}", e);
             }
@@ -792,6 +802,7 @@ fn main() -> Result<()> {
                 &mut midi_out,
                 &config,
                 &volume_memory,
+                &mut last_restored,
             ) {
                 warn!("Stream rescan failed: {}", e);
             }
@@ -861,6 +872,7 @@ fn rescan_streams(
     midi_out: &mut midir::MidiOutputConnection,
     config: &config::Config,
     volume_memory: &HashMap<String, (f64, bool)>,
+    last_restored: &mut [Option<Instant>; midi::NUM_CONTROLS],
 ) -> Result<()> {
     let all_fresh = pipewire::list_streams(config)?;
     let (partitioned, new_linked) = partition_linked_streams(all_fresh, config);
@@ -871,8 +883,19 @@ fn rescan_streams(
 
     if old_ids != new_ids {
         let prev_count = assigned.len();
+        let new_count = fresh.len();
+        // Clear restore stamps for slots whose stream went away or changed app
+        for (i, slot) in last_restored.iter_mut().enumerate() {
+            let same_app = assigned
+                .get(i)
+                .zip(fresh.get(i))
+                .is_some_and(|(o, n)| o.app_name == n.app_name);
+            if !same_app {
+                *slot = None;
+            }
+        }
         // Restore remembered volumes for any streams whose node ID changed
-        for stream in &mut fresh {
+        for (i, stream) in fresh.iter_mut().enumerate() {
             let is_new_id = !old_ids.contains(&stream.id);
             if is_new_id {
                 if let Some(&(vol, muted)) = volume_memory.get(&stream.app_name) {
@@ -889,13 +912,67 @@ fn rescan_streams(
                         }
                         stream.volume = vol;
                         stream.muted = muted;
+                        if i < last_restored.len() {
+                            last_restored[i] = Some(Instant::now());
+                        }
                     }
                 }
             }
         }
-        info!("Streams changed: {} -> {} streams", prev_count, fresh.len());
-        apply_stream_config(dev, &fresh, prev_count)?;
-        sync_midi_state(midi_out, &fresh)?;
+        info!("Streams changed: {} -> {} streams", prev_count, new_count);
+
+        // Slot-by-slot diff: only touch the firmware for slots that actually
+        // differ from the daemon's last-known state. A bare id change with
+        // identical display + restored volume sends nothing — the encoder
+        // stays where it is.
+        let mut config_started = false;
+        for (i, new) in fresh.iter().enumerate() {
+            let old = assigned.get(i);
+            let knob_changed = old.map_or(true, |o| {
+                o.app_name != new.app_name || o.color_scheme != new.color_scheme
+            });
+            let btn_changed = old.map_or(true, |o| {
+                o.media_name != new.media_name || o.accent_color != new.accent_color
+            });
+            if knob_changed || btn_changed {
+                if !config_started {
+                    dev.start_config_update()?;
+                    config_started = true;
+                }
+                if knob_changed {
+                    dev.send_midi_knob_config(&make_knob_config(i, new))?;
+                }
+                if btn_changed {
+                    dev.send_midi_button_config(&make_button_config(i, new))?;
+                }
+            }
+        }
+        if new_count < prev_count {
+            if !config_started {
+                dev.start_config_update()?;
+                config_started = true;
+            }
+            for i in new_count..prev_count {
+                dev.send_clear_knob(0, i as u8)?;
+                dev.send_clear_button(0, i as u8)?;
+            }
+        }
+        if config_started {
+            dev.end_config_update()?;
+        }
+
+        for (i, new) in fresh.iter().enumerate() {
+            let old = assigned.get(i);
+            let vol_changed = old.map_or(true, |o| (o.volume - new.volume).abs() > 0.005);
+            let mute_changed = old.map_or(true, |o| o.muted != new.muted);
+            if vol_changed {
+                midi::send_knob_value(midi_out, i, volume_to_cc(new.volume))?;
+            }
+            if mute_changed {
+                midi::send_button_value(midi_out, i, if new.muted { 127 } else { 0 })?;
+            }
+        }
+
         *assigned = fresh;
         *linked_children = new_linked;
         return Ok(());
@@ -932,19 +1009,58 @@ fn rescan_streams(
 
     // Sync encoder positions for any externally-changed volumes/mutes
     for (i, (old, new)) in assigned.iter_mut().zip(fresh.iter()).enumerate() {
-        let vol_delta = (old.volume - new.volume).abs();
-        if vol_delta > 0.005 {
-            debug!(
-                "Stream {} volume drifted: {:.2} -> {:.2}",
-                i, old.volume, new.volume
-            );
-            midi::send_knob_value(midi_out, i, volume_to_cc(new.volume))?;
-            old.volume = new.volume;
-        }
-        if old.muted != new.muted {
-            debug!("Stream {} mute drifted: {} -> {}", i, old.muted, new.muted);
-            midi::send_button_value(midi_out, i, if new.muted { 127 } else { 0 })?;
-            old.muted = new.muted;
+        let suppressed = last_restored
+            .get(i)
+            .and_then(|t| *t)
+            .is_some_and(|t| t.elapsed() < RESTORE_SUPPRESS_WINDOW);
+        if !suppressed {
+            // Suspect-default detection: if PW now reports ~1.0 (the default
+            // for a freshly-created/reset stream) but our memory says the user
+            // had set a different value, treat this as an in-place reset
+            // (e.g. Chrome rebuilding the audio context on a YouTube seek)
+            // rather than a legitimate volume change. Push memory back to PW
+            // and leave the encoder where it was.
+            let pw_at_default = (new.volume - 1.0).abs() < 0.01 && !new.muted;
+            let memory_lookup = volume_memory.get(&new.app_name).copied();
+            let memory_differs = memory_lookup
+                .is_some_and(|(v, _)| (v - new.volume).abs() > 0.005);
+            if pw_at_default && memory_differs {
+                let (v, m) = memory_lookup.unwrap();
+                info!(
+                    "Stream {} ({}) reset to default, restoring to {:.0}%{}",
+                    i,
+                    new.app_name,
+                    v * 100.0,
+                    if m { " MUTED" } else { "" }
+                );
+                let _ = pipewire::set_volume(new.id, v);
+                if m != new.muted {
+                    let _ = pipewire::toggle_mute(new.id);
+                }
+                if let Some(slot) = last_restored.get_mut(i) {
+                    *slot = Some(Instant::now());
+                }
+                // Keep `old.volume`/`old.muted` as the memory value — that's
+                // still the truth from the user's perspective.
+            } else {
+                let vol_delta = (old.volume - new.volume).abs();
+                if vol_delta > 0.005 {
+                    debug!(
+                        "Stream {} volume drifted: {:.2} -> {:.2}",
+                        i, old.volume, new.volume
+                    );
+                    midi::send_knob_value(midi_out, i, volume_to_cc(new.volume))?;
+                    old.volume = new.volume;
+                }
+                if old.muted != new.muted {
+                    debug!("Stream {} mute drifted: {} -> {}", i, old.muted, new.muted);
+                    midi::send_button_value(midi_out, i, if new.muted { 127 } else { 0 })?;
+                    old.muted = new.muted;
+                }
+                if let Some(slot) = last_restored.get_mut(i) {
+                    *slot = None;
+                }
+            }
         }
         old.app_name = new.app_name.clone();
         old.color_scheme = new.color_scheme;
@@ -983,7 +1099,7 @@ fn make_knob_config(i: usize, stream: &pipewire::AudioStream) -> protocol::MidiK
         max_value: 127,
         control_name: stream.app_name.clone(),
         color_scheme: pick_color(stream),
-        haptic_mode: protocol::KnobHapticMode::Continuous,
+        haptic_mode: protocol::KnobHapticMode::Detented,
         haptic_indent1: 0xFF,
         haptic_indent2: 0xFF,
         haptic_steps: 0,
