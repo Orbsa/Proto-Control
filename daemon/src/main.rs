@@ -23,6 +23,9 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// so subsequent `pw-dump`s can briefly still report the pre-restore value —
 /// without this window the drift block would yank the encoder back to it.
 const RESTORE_SUPPRESS_WINDOW: Duration = Duration::from_millis(750);
+/// How long to wait between reconnect attempts when the device is missing
+/// (e.g. the user has KVM-switched the USB to another machine).
+const RECONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Color scheme indices chosen to be visually distinct across the 85-entry palette.
 const COLOR_POOL: &[u8] = &[
@@ -147,37 +150,7 @@ fn main() -> Result<()> {
         })?;
     }
 
-    // 1. Connect to the Roto-Control serial port
-    let port_path = find_roto_control_port()
-        .context("Could not find Roto-Control device. Is it plugged in?")?;
-    info!("Found Roto-Control at {}", port_path);
-
-    let port = serialport::new(&port_path, 115_200)
-        .timeout(Duration::from_secs(2))
-        .open()
-        .with_context(|| format!("Failed to open {}", port_path))?;
-
-    let mut dev = protocol::Device::new(port);
-
-    // Verify firmware
-    let version = dev.get_version()?;
-    info!(
-        "Firmware: {}.{}.{} ({})",
-        version.major, version.minor, version.patch, version.commit
-    );
-
-    // 2. Switch to MIDI mode, clear stale state, and set setup names
-    info!("Switching to MIDI mode...");
-    dev.set_mode(protocol::Mode::Midi, 0)?;
-
-    // Clear all controls across all 3 setups to wipe state from any previous
-    // unclean shutdown. Uses the fast path (no 100ms drain per command).
-    info!("Clearing all controls...");
-    dev.clear_all(4)?;
-
-    dev.set_setup_name(0, "PipeWire")?;
-
-    // 3. Load config and enumerate PipeWire streams
+    // 1. Load config and enumerate PipeWire streams (no device dependency)
     let mut config = config::Config::load();
     let (mut assigned_streams, mut linked_child_ids): (
         Vec<pipewire::AudioStream>,
@@ -198,84 +171,40 @@ fn main() -> Result<()> {
         (vec![], HashMap::new())
     };
 
-    // 4. Configure page 1 (PipeWire streams)
-    if !assigned_streams.is_empty() {
-        apply_stream_config(&mut dev, &assigned_streams, 0)?;
-    }
+    // 2. Persistent daemon state — survives device reconnects
+    let mut discord_members: Vec<discord::VoiceMember> = vec![];
+    let mut ts3_members: Vec<teamspeak::TsMember> = vec![];
 
-    // 5. Open MIDI connections
-    info!("Opening MIDI connections...");
-    let mut midi_out = midi::open_output()?;
-    let (_midi_in_conn, midi_rx) = midi::open_input()?;
-
-    // 6. Set initial knob positions to match current volumes
-    if !assigned_streams.is_empty() {
-        std::thread::sleep(Duration::from_millis(200));
-        sync_midi_state(&mut midi_out, &assigned_streams)?;
-    }
-
-    // Set MPV initial knob positions — speed knob at centre (1.0x)
-    std::thread::sleep(Duration::from_millis(200));
-    midi::send_mpv_knob_value(
-        &mut midi_out,
-        MPV_SPEED_CONTROL,
-        mpv::HOME_CC,
-    )?;
-    midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0)?; // LED off = playing
-    midi::send_mpv_knob_value(&mut midi_out, MPV_FRAME_CONTROL, 0)?; // frame jog at 0
-    midi::send_mpv_button_value(&mut midi_out, MPV_FRAME_CONTROL, 0)?;
-
-    // 7. Start Discord integration on page 2 (if configured and enabled)
-    let discord_handle = if let Some(ref dc) = config.discord {
-        if dc.enabled {
-            dev.set_setup_name(1, "Discord")?;
+    // 3. Background services that don't depend on the device. Started once;
+    // they continue running across USB disconnects so events that fire while
+    // we're disconnected are handled by the daemon as soon as we reconnect.
+    let _tray_handle = tray::spawn(shutdown.clone());
+    let pw_events = pipewire::watch_changes();
+    let discord_handle = match config.discord.as_ref().filter(|d| d.enabled) {
+        Some(dc) => {
             info!("Starting Discord voice integration...");
-            Some(discord::start(
-                dc.client_id.clone(),
-                dc.client_secret.clone(),
-            ))
-        } else {
+            Some(discord::start(dc.client_id.clone(), dc.client_secret.clone()))
+        }
+        None => {
             info!("Discord integration disabled");
             None
         }
-    } else {
-        None
     };
-    let mut discord_members: Vec<discord::VoiceMember> = vec![];
-
-    // 7b. Start TeamSpeak integration on page 3 (if configured and enabled)
-    let ts3_handle = if let Some(ref ts) = config.teamspeak {
-        if ts.enabled {
-            dev.set_setup_name(2, "TeamSpeak")?;
+    let ts3_handle = match config.teamspeak.as_ref().filter(|t| t.enabled) {
+        Some(ts) => {
             info!("Starting TeamSpeak voice integration...");
             Some(teamspeak::start(ts.socket_path.clone()))
-        } else {
+        }
+        None => {
             info!("TeamSpeak integration disabled");
             None
         }
-    } else {
-        None
     };
-    let mut ts3_members: Vec<teamspeak::TsMember> = vec![];
-
-    // 7c. Configure MPV speed knob on page 4, control surface 8 (index 7)
-    dev.set_setup_name(3, "MPV")?;
-    info!("Configuring MPV speed knob...");
-    apply_mpv_config(&mut dev)?;
     let mpv_socket = mpv::default_socket_path();
     info!("Starting MPV integration (socket: {})...", mpv_socket);
     let mpv_handle = mpv::start(mpv_socket);
 
-    // 8. Start tray icon
-    let tray_shutdown = shutdown.clone();
-    let _tray_handle = tray::spawn(tray_shutdown);
-
-    // 9. Start PipeWire event watcher
-    let pw_events = pipewire::watch_changes();
-
-    info!("Ready! Turn knobs to adjust volume, press buttons to mute/unmute.");
-
-    // 10. Main event loop
+    // 4. Persistent state — survives device reconnects.
     let mut last_scan = Instant::now();
     let mut last_config_mtime = config_file_mtime();
     // Remember last known volume/mute per app so we can restore it when a stream restarts
@@ -288,16 +217,7 @@ fn main() -> Result<()> {
     // RESTORE_SUPPRESS_WINDOW, drift detection ignores this slot so that a
     // not-yet-propagated wpctl change doesn't drag the encoder back.
     let mut last_restored: [Option<Instant>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    // Pending latest values per control index (None = no pending change)
-    let mut pending_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_discord_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_discord_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_ts3_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_ts3_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_mpv_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    let mut pending_mpv_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
-    // MPV state
+    // MPV state — preserved across reconnects so the redraw uses the right values
     let mut mpv_paused = false;
     let mut mpv_current_speed: f64 = 1.0;
     // Spring-return: track when the last speed knob movement was, so we can
@@ -308,7 +228,60 @@ fn main() -> Result<()> {
     let mut mpv_frame_last_cc: Option<u8> = None;
     let mut mpv_frame_stepping = false; // true while user is frame-stepping (suppress state updates)
 
-    while !shutdown.load(Ordering::SeqCst) {
+    // 5. Reconnect loop. Each iteration is one connected lifetime: connect,
+    // redraw the device from in-memory state, run the event loop until either
+    // shutdown (Ok) or a device-disconnect error.
+    'reconnect: loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break 'reconnect;
+        }
+
+        let DeviceCtx {
+            mut dev,
+            mut midi_out,
+            _midi_in_conn,
+            midi_rx,
+        } = match connect_with_retry(&shutdown) {
+            Some(c) => c,
+            None => break 'reconnect,
+        };
+
+        if let Err(e) = redraw_device(
+            &mut dev,
+            &mut midi_out,
+            &config,
+            &assigned_streams,
+            &discord_members,
+            &ts3_members,
+            mpv_paused,
+            mpv_current_speed,
+        ) {
+            if is_disconnect_error(&e) {
+                warn!("Device disconnected during init: {}, reconnecting...", e);
+                continue 'reconnect;
+            }
+            return Err(e);
+        }
+
+        info!("Ready! Turn knobs to adjust volume, press buttons to mute/unmute.");
+
+        // Per-connection transient state — pending events from a freshly opened
+        // MIDI input port. Cleared each reconnect so we don't act on stale values
+        // captured before a disconnect.
+        let mut pending_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_discord_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_discord_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_ts3_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_ts3_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_mpv_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+        let mut pending_mpv_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+
+        // Inner event loop. Wrapped in an immediately-invoked closure so we can
+        // bubble device-IO errors out of `?` and route them to the reconnect
+        // logic below — instead of crashing the whole daemon.
+        let result: Result<()> = (|| -> Result<()> {
+            while !shutdown.load(Ordering::SeqCst) {
         // Wait for at least one event, then drain all pending to batch
         let first = midi_rx.recv_timeout(Duration::from_millis(100));
         let events: Vec<_> = match first {
@@ -321,8 +294,15 @@ fn main() -> Result<()> {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => vec![],
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                warn!("MIDI input disconnected");
-                break;
+                // MIDI callback's sender was dropped — the input port died,
+                // which on Linux usually means the USB device was unplugged.
+                // Wrap as an io::Error so `is_disconnect_error` recognises it
+                // and the outer loop reconnects instead of crashing.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "MIDI input disconnected",
+                )
+                .into());
             }
         };
 
@@ -689,9 +669,11 @@ fn main() -> Result<()> {
                         fresh.len()
                     );
                     if let Err(e) = apply_ts3_config(&mut dev, &fresh, prev_len, &config) {
+                        if is_disconnect_error(&e) { return Err(e); }
                         warn!("Failed to configure TeamSpeak page: {}", e);
                     }
                     if let Err(e) = sync_ts3_midi_state(&mut midi_out, &fresh) {
+                        if is_disconnect_error(&e) { return Err(e); }
                         warn!("Failed to sync TS3 MIDI state: {}", e);
                     }
                 }
@@ -741,10 +723,12 @@ fn main() -> Result<()> {
                         fresh.len()
                     );
                     if let Err(e) = apply_discord_config(&mut dev, &fresh, prev_len, &config) {
+                        if is_disconnect_error(&e) { return Err(e); }
                         warn!("Failed to configure Discord page: {}", e);
                     }
                     if old_ids != new_ids {
                         if let Err(e) = sync_discord_midi_state(&mut midi_out, &fresh) {
+                            if is_disconnect_error(&e) { return Err(e); }
                             warn!("Failed to sync Discord MIDI state: {}", e);
                         }
                     }
@@ -770,6 +754,7 @@ fn main() -> Result<()> {
                 &volume_memory,
                 &mut last_restored,
             ) {
+                if is_disconnect_error(&e) { return Err(e); }
                 warn!("Stream rescan after config reload failed: {}", e);
             }
             last_scan = Instant::now(); // don't double-rescan below
@@ -778,12 +763,14 @@ fn main() -> Result<()> {
                 if let Err(e) =
                     apply_discord_config(&mut dev, &discord_members, discord_members.len(), &config)
                 {
+                    if is_disconnect_error(&e) { return Err(e); }
                     warn!("Failed to reapply Discord config: {}", e);
                 }
             }
             if !ts3_members.is_empty() {
                 if let Err(e) = apply_ts3_config(&mut dev, &ts3_members, ts3_members.len(), &config)
                 {
+                    if is_disconnect_error(&e) { return Err(e); }
                     warn!("Failed to reapply TS3 config: {}", e);
                 }
             }
@@ -804,21 +791,39 @@ fn main() -> Result<()> {
                 &volume_memory,
                 &mut last_restored,
             ) {
+                if is_disconnect_error(&e) {
+                    return Err(e);
+                }
                 warn!("Stream rescan failed: {}", e);
             }
         }
-    }
+            }
+            Ok(())
+        })();
 
-    // 10. Cleanup: clear only active controls
-    info!("Shutting down, clearing display...");
-    let active_counts = [
-        (0u8, assigned_streams.len()),
-        (1u8, discord_members.len()),
-        (2u8, ts3_members.len()),
-        (3u8, MPV_SPEED_CONTROL + 1), // MPV: clear through index 7 (covers both frame + speed)
-    ];
-    if let Err(e) = dev.clear_active(&active_counts) {
-        warn!("Failed to clear display: {}", e);
+        match result {
+            Ok(()) => {
+                info!("Shutting down, clearing display...");
+                let active_counts = [
+                    (0u8, assigned_streams.len()),
+                    (1u8, discord_members.len()),
+                    (2u8, ts3_members.len()),
+                    (3u8, MPV_SPEED_CONTROL + 1),
+                ];
+                if let Err(e) = dev.clear_active(&active_counts) {
+                    warn!("Failed to clear display: {}", e);
+                }
+                break 'reconnect;
+            }
+            Err(e) if is_disconnect_error(&e) => {
+                warn!("Device disconnected: {}, reconnecting...", e);
+                drop(midi_out);
+                drop(_midi_in_conn);
+                drop(dev);
+                continue 'reconnect;
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(())
@@ -1736,3 +1741,173 @@ fn find_roto_control_port() -> Option<String> {
     debug!("Found Roto-Control ports via sysfs: {:?}", found);
     found.into_iter().next()
 }
+
+// ---- Device connection / reconnection ----
+
+/// Bundle the four resources that make up a live connection to the device.
+/// Dropped together when the connection is lost so the OS can release the
+/// serial + ALSA seq handles before we try to reopen them.
+struct DeviceCtx {
+    dev: protocol::Device,
+    midi_out: midir::MidiOutputConnection,
+    /// Held to keep the MIDI input port open; events arrive via `midi_rx`.
+    _midi_in_conn: midir::MidiInputConnection<()>,
+    midi_rx: std::sync::mpsc::Receiver<midi::DeviceEvent>,
+}
+
+/// Heuristic: does this error look like the device went away?
+/// Covers the patterns seen on Linux when USB is yanked (or KVM-switched):
+/// the serial port reads/writes fail with `BrokenPipe`, `NotConnected`,
+/// `NotFound`, or `Other` (libudev returns the latter on enumerate failure
+/// for a freshly-detached node), and reads time out because the device
+/// stopped responding.
+fn is_disconnect_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::*;
+            if matches!(
+                io.kind(),
+                BrokenPipe | NotConnected | NotFound | UnexpectedEof | TimedOut | Other
+            ) {
+                return true;
+            }
+        }
+        if let Some(serial) = cause.downcast_ref::<serialport::Error>() {
+            return matches!(
+                serial.kind(),
+                serialport::ErrorKind::NoDevice | serialport::ErrorKind::Io(_)
+            );
+        }
+    }
+    false
+}
+
+/// Open the serial port, MIDI in, and MIDI out. Verifies the firmware version
+/// (logs it; failure here is fatal because if the firmware-version handshake
+/// fails the device is in some bad state and clearing config blindly is unsafe).
+fn connect_device() -> Result<DeviceCtx> {
+    let port_path = find_roto_control_port()
+        .context("Could not find Roto-Control device. Is it plugged in?")?;
+    info!("Found Roto-Control at {}", port_path);
+
+    let port = serialport::new(&port_path, 115_200)
+        .timeout(Duration::from_secs(2))
+        .open()
+        .with_context(|| format!("Failed to open {}", port_path))?;
+
+    let mut dev = protocol::Device::new(port);
+    let version = dev.get_version()?;
+    info!(
+        "Firmware: {}.{}.{} ({})",
+        version.major, version.minor, version.patch, version.commit
+    );
+
+    let midi_out = midi::open_output()?;
+    let (midi_in_conn, midi_rx) = midi::open_input()?;
+
+    Ok(DeviceCtx {
+        dev,
+        midi_out,
+        _midi_in_conn: midi_in_conn,
+        midi_rx,
+    })
+}
+
+/// Loop on `connect_device` with a logged backoff until the device shows up
+/// or the user asked to shut down. Returns `None` only on shutdown.
+fn connect_with_retry(shutdown: &AtomicBool) -> Option<DeviceCtx> {
+    let mut attempt = 0u32;
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return None;
+        }
+        match connect_device() {
+            Ok(ctx) => return Some(ctx),
+            Err(e) => {
+                // Log loudly the first time, then quietly to avoid spamming
+                // when the device is parked on another KVM input.
+                if attempt == 0 {
+                    warn!("Device not available: {}. Waiting for reconnect...", e);
+                } else if attempt % 30 == 0 {
+                    debug!("Still waiting for device (attempt {}): {}", attempt, e);
+                }
+                attempt = attempt.saturating_add(1);
+                std::thread::sleep(RECONNECT_RETRY_INTERVAL);
+            }
+        }
+    }
+}
+
+/// Push the daemon's current view of every page back onto the device.
+/// Used both for first-time setup and to recover after a reconnect — the
+/// device has lost all state across a disconnect, so we replay configs and
+/// values from the in-memory model.
+#[allow(clippy::too_many_arguments)]
+fn redraw_device(
+    dev: &mut protocol::Device,
+    midi_out: &mut midir::MidiOutputConnection,
+    config: &config::Config,
+    assigned_streams: &[pipewire::AudioStream],
+    discord_members: &[discord::VoiceMember],
+    ts3_members: &[teamspeak::TsMember],
+    mpv_paused: bool,
+    mpv_current_speed: f64,
+) -> Result<()> {
+    info!("Initializing device state...");
+    dev.set_mode(protocol::Mode::Midi, 0)?;
+    dev.clear_all(4)?;
+
+    dev.set_setup_name(0, "PipeWire")?;
+    if !assigned_streams.is_empty() {
+        apply_stream_config(dev, assigned_streams, 0)?;
+    }
+
+    if config.discord.as_ref().is_some_and(|d| d.enabled) {
+        dev.set_setup_name(1, "Discord")?;
+        if !discord_members.is_empty() {
+            apply_discord_config(dev, discord_members, 0, config)?;
+        }
+    }
+
+    if config.teamspeak.as_ref().is_some_and(|t| t.enabled) {
+        dev.set_setup_name(2, "TeamSpeak")?;
+        if !ts3_members.is_empty() {
+            apply_ts3_config(dev, ts3_members, 0, config)?;
+        }
+    }
+
+    dev.set_setup_name(3, "MPV")?;
+    apply_mpv_config(dev)?;
+
+    // Give the device a beat to digest the configs before we start streaming
+    // value updates back to it (the existing setup flow does this too).
+    std::thread::sleep(Duration::from_millis(200));
+
+    if !assigned_streams.is_empty() {
+        sync_midi_state(midi_out, assigned_streams)?;
+    }
+
+    for (i, m) in discord_members.iter().enumerate() {
+        midi::send_discord_knob_value(midi_out, i, discord_volume_to_cc(m.volume))?;
+        midi::send_discord_button_value(midi_out, i, if m.muted { 127 } else { 0 })?;
+    }
+    for (i, m) in ts3_members.iter().enumerate() {
+        midi::send_ts3_knob_value(midi_out, i, discord_volume_to_cc(m.volume))?;
+        midi::send_ts3_button_value(midi_out, i, if m.muted { 127 } else { 0 })?;
+    }
+
+    midi::send_mpv_knob_value(midi_out, MPV_SPEED_CONTROL, mpv::speed_to_cc(mpv_current_speed))?;
+    midi::send_mpv_button_value(
+        midi_out,
+        MPV_SPEED_CONTROL,
+        if mpv_paused { 127 } else { 0 },
+    )?;
+    midi::send_mpv_knob_value(midi_out, MPV_FRAME_CONTROL, 0)?;
+    midi::send_mpv_button_value(midi_out, MPV_FRAME_CONTROL, 0)?;
+
+    update_mpv_speed_display(dev, mpv_current_speed)?;
+    update_mpv_frame_display(dev, mpv_paused)?;
+
+    Ok(())
+}
+
