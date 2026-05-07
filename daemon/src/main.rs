@@ -2,6 +2,7 @@ mod config;
 mod discord;
 mod gui;
 mod midi;
+mod mpv;
 mod pipewire;
 mod protocol;
 mod teamspeak;
@@ -112,6 +113,11 @@ fn partition_linked_streams(
 }
 
 fn main() -> Result<()> {
+    // Flash patched firmware if requested
+    if std::env::args().any(|a| a == "--flash-firmware") {
+        return flash_firmware();
+    }
+
     // Launch the settings GUI if requested
     if std::env::args().any(|a| a == "--settings") {
         // Catch panics from iced (e.g. no display server available)
@@ -162,7 +168,7 @@ fn main() -> Result<()> {
     // Clear all controls across all 3 setups to wipe state from any previous
     // unclean shutdown. Uses the fast path (no 100ms drain per command).
     info!("Clearing all controls...");
-    dev.clear_all(3)?;
+    dev.clear_all(4)?;
 
     dev.set_setup_name(0, "PipeWire")?;
 
@@ -203,6 +209,17 @@ fn main() -> Result<()> {
         sync_midi_state(&mut midi_out, &assigned_streams)?;
     }
 
+    // Set MPV initial knob positions — speed knob at centre (1.0x)
+    std::thread::sleep(Duration::from_millis(200));
+    midi::send_mpv_knob_value(
+        &mut midi_out,
+        MPV_SPEED_CONTROL,
+        mpv::HOME_CC,
+    )?;
+    midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0)?; // LED off = playing
+    midi::send_mpv_knob_value(&mut midi_out, MPV_FRAME_CONTROL, 0)?; // frame jog at 0
+    midi::send_mpv_button_value(&mut midi_out, MPV_FRAME_CONTROL, 0)?;
+
     // 7. Start Discord integration on page 2 (if configured and enabled)
     let discord_handle = if let Some(ref dc) = config.discord {
         if dc.enabled {
@@ -236,6 +253,14 @@ fn main() -> Result<()> {
     };
     let mut ts3_members: Vec<teamspeak::TsMember> = vec![];
 
+    // 7c. Configure MPV speed knob on page 4, control surface 8 (index 7)
+    dev.set_setup_name(3, "MPV")?;
+    info!("Configuring MPV speed knob...");
+    apply_mpv_config(&mut dev)?;
+    let mpv_socket = mpv::default_socket_path();
+    info!("Starting MPV integration (socket: {})...", mpv_socket);
+    let mpv_handle = mpv::start(mpv_socket);
+
     // 8. Start tray icon
     let tray_shutdown = shutdown.clone();
     let _tray_handle = tray::spawn(tray_shutdown);
@@ -261,6 +286,18 @@ fn main() -> Result<()> {
     let mut pending_discord_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
     let mut pending_ts3_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
     let mut pending_ts3_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+    let mut pending_mpv_knobs: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+    let mut pending_mpv_buttons: [Option<u8>; midi::NUM_CONTROLS] = [None; midi::NUM_CONTROLS];
+    // MPV state
+    let mut mpv_paused = false;
+    let mut mpv_current_speed: f64 = 1.0;
+    // Spring-return: track when the last speed knob movement was, so we can
+    // snap back to 1.0x after the centre-indent motor pulls the knob home.
+    let mut mpv_speed_last_touch: Instant = Instant::now();
+    let mut mpv_speed_deflected = false; // true while knob is away from centre
+    // Frame jog state: track last CC to detect direction
+    let mut mpv_frame_last_cc: Option<u8> = None;
+    let mut mpv_frame_stepping = false; // true while user is frame-stepping (suppress state updates)
 
     while !shutdown.load(Ordering::SeqCst) {
         // Wait for at least one event, then drain all pending to batch
@@ -306,6 +343,14 @@ fn main() -> Result<()> {
                     if index < midi::NUM_CONTROLS =>
                 {
                     pending_ts3_buttons[index] = Some(value);
+                }
+                midi::DeviceEvent::MpvKnobTurn { index, value } if index < midi::NUM_CONTROLS => {
+                    pending_mpv_knobs[index] = Some(value);
+                }
+                midi::DeviceEvent::MpvButtonPress { index, value }
+                    if index < midi::NUM_CONTROLS =>
+                {
+                    pending_mpv_buttons[index] = Some(value);
                 }
                 _ => {}
             }
@@ -435,6 +480,165 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        // Apply coalesced MPV frame jog
+        if let Some(value) = pending_mpv_knobs[MPV_FRAME_CONTROL].take() {
+            if mpv_paused {
+                // Detect rotation direction from CC delta (linear 0-127, no wrap-around)
+                if let Some(prev) = mpv_frame_last_cc {
+                    let delta = value as i16 - prev as i16;
+                    if delta > 0 {
+                        debug!("MPV frame: step forward (delta={})", delta);
+                        mpv_frame_stepping = true;
+                        let _ = mpv_handle.cmd_tx.send(mpv::Command::FrameStep);
+                    } else if delta < 0 {
+                        debug!("MPV frame: step backward (delta={})", delta);
+                        mpv_frame_stepping = true;
+                        let _ = mpv_handle.cmd_tx.send(mpv::Command::FrameBackStep);
+                    }
+                }
+            }
+            mpv_frame_last_cc = Some(value);
+        }
+
+        // Apply coalesced MPV speed knob (spring-return centre-indent).
+        // CC 64 = 1.0x (centre), 0 = 0.0x (pause), 127 = 2.0x.
+        // The motor physically pulls the knob back to centre when released.
+        if let Some(value) = pending_mpv_knobs[MPV_SPEED_CONTROL].take() {
+            let speed = mpv::cc_to_speed(value);
+            let at_centre = (value as i16 - mpv::HOME_CC as i16).unsigned_abs() <= 2;
+            debug!("MPV speed: CC {} -> {:.2}x (centre={})", value, speed, at_centre);
+
+            mpv_speed_last_touch = Instant::now();
+
+            if at_centre {
+                // Knob is at or near centre — 1.0x normal playback
+                if mpv_speed_deflected {
+                    mpv_speed_deflected = false;
+                    mpv_current_speed = 1.0;
+                    let _ = mpv_handle.cmd_tx.send(mpv::Command::SetSpeed(1.0));
+                    if mpv_paused {
+                        mpv_paused = false;
+                        let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(false));
+                        let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0);
+                        let _ = update_mpv_frame_display(&mut dev, false);
+                    }
+                    let _ = update_mpv_speed_display(&mut dev, 1.0);
+                }
+            } else {
+                // Knob deflected from centre — adjust speed
+                mpv_speed_deflected = true;
+                mpv_current_speed = speed;
+
+                if speed < 0.01 {
+                    // Fully CCW — pause
+                    if !mpv_paused {
+                        mpv_paused = true;
+                        info!("MPV: paused (knob at 0)");
+                        let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(true));
+                        let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 127);
+                        let _ = update_mpv_frame_display(&mut dev, true);
+                    }
+                } else {
+                    let _ = mpv_handle.cmd_tx.send(mpv::Command::SetSpeed(speed));
+                    if mpv_paused {
+                        mpv_paused = false;
+                        let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(false));
+                        let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0);
+                        let _ = update_mpv_frame_display(&mut dev, false);
+                    }
+                }
+                let _ = update_mpv_speed_display(&mut dev, speed);
+            }
+        }
+
+        // Spring-return: if the knob was deflected and hasn't moved for a while,
+        // the motor has pulled it back to centre. Snap speed to 1.0x.
+        if mpv_speed_deflected
+            && mpv_speed_last_touch.elapsed() > Duration::from_millis(mpv::SPRING_RETURN_MS)
+        {
+            mpv_speed_deflected = false;
+            mpv_current_speed = 1.0;
+            info!("MPV: spring-return to 1.0x");
+            let _ = mpv_handle.cmd_tx.send(mpv::Command::SetSpeed(1.0));
+            if mpv_paused {
+                mpv_paused = false;
+                let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(false));
+                let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0);
+                let _ = update_mpv_frame_display(&mut dev, false);
+            }
+            let _ = update_mpv_speed_display(&mut dev, 1.0);
+        }
+
+        if let Some(value) = pending_mpv_buttons[MPV_SPEED_CONTROL].take() {
+            // Button toggles pause
+            if value > 0 {
+                mpv_paused = true;
+                info!("MPV: paused (button)");
+                let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(true));
+                let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 127);
+                let _ = update_mpv_speed_display(&mut dev, 0.0);
+                let _ = update_mpv_frame_display(&mut dev, true);
+            } else {
+                mpv_paused = false;
+                info!("MPV: resumed at 1.0x (button)");
+                let _ = mpv_handle.cmd_tx.send(mpv::Command::SetPause(false));
+                let _ = mpv_handle.cmd_tx.send(mpv::Command::SetSpeed(1.0));
+                let _ = midi::send_mpv_button_value(&mut midi_out, MPV_SPEED_CONTROL, 0);
+                // Snap knob back to centre
+                let _ = midi::send_mpv_knob_value(
+                    &mut midi_out,
+                    MPV_SPEED_CONTROL,
+                    mpv::HOME_CC,
+                );
+                let _ = update_mpv_speed_display(&mut dev, 1.0);
+                let _ = update_mpv_frame_display(&mut dev, false);
+            }
+        }
+
+        // Check for MPV state updates (speed/pause changed externally)
+        while let Ok(state) = mpv_handle.state_rx.try_recv() {
+            if state.connected {
+                // While frame-stepping, MPV briefly changes pause state — ignore
+                if mpv_frame_stepping {
+                    if state.paused {
+                        mpv_frame_stepping = false;
+                    }
+                    continue;
+                }
+
+                if state.paused != mpv_paused {
+                    let was_paused = mpv_paused;
+                    mpv_paused = state.paused;
+                    let _ = midi::send_mpv_button_value(
+                        &mut midi_out,
+                        MPV_SPEED_CONTROL,
+                        if mpv_paused { 127 } else { 0 },
+                    );
+                    if mpv_paused {
+                        let _ = update_mpv_speed_display(&mut dev, 0.0);
+                    } else {
+                        // Snap knob to centre on unpause
+                        let _ = midi::send_mpv_knob_value(
+                            &mut midi_out,
+                            MPV_SPEED_CONTROL,
+                            mpv::HOME_CC,
+                        );
+                        let _ = update_mpv_speed_display(&mut dev, 1.0);
+                    }
+                    if was_paused != mpv_paused {
+                        let _ = update_mpv_frame_display(&mut dev, mpv_paused);
+                    }
+                }
+                // External speed change ��� update display but don't move the knob
+                // (it's spring-return, so the physical position doesn't represent state)
+                if (state.speed - mpv_current_speed).abs() > 0.01 && !mpv_paused {
+                    mpv_current_speed = state.speed;
+                    let _ = update_mpv_speed_display(&mut dev, state.speed);
+                }
+            }
+        }
+
 
         // Check for TS3 member updates
         if let Some(ref handle) = ts3_handle {
@@ -600,6 +804,7 @@ fn main() -> Result<()> {
         (0u8, assigned_streams.len()),
         (1u8, discord_members.len()),
         (2u8, ts3_members.len()),
+        (3u8, MPV_SPEED_CONTROL + 1), // MPV: clear through index 7 (covers both frame + speed)
     ];
     if let Err(e) = dev.clear_active(&active_counts) {
         warn!("Failed to clear display: {}", e);
@@ -778,7 +983,7 @@ fn make_knob_config(i: usize, stream: &pipewire::AudioStream) -> protocol::MidiK
         max_value: 127,
         control_name: stream.app_name.clone(),
         color_scheme: pick_color(stream),
-        haptic_mode: protocol::KnobHapticMode::Normal,
+        haptic_mode: protocol::KnobHapticMode::Continuous,
         haptic_indent1: 0xFF,
         haptic_indent2: 0xFF,
         haptic_steps: 0,
@@ -990,6 +1195,161 @@ fn sync_ts3_midi_state(
     Ok(())
 }
 
+// ---- Page 4: MPV speed control ----
+
+/// MPV frame jog control index (0-based). "Control surface 7" = index 6.
+const MPV_FRAME_CONTROL: usize = 6;
+/// MPV speed knob control index (0-based). "Control surface 8" = index 7.
+const MPV_SPEED_CONTROL: usize = 7;
+
+fn apply_mpv_config(dev: &mut protocol::Device) -> Result<()> {
+    dev.start_config_update()?;
+
+    // Frame jog wheel — Endless 360° rotation with evenly-spaced magnetic
+    // detents (one per frame at 24fps).  Requires patched firmware (step
+    // limit raised from 16 → 60).
+    let f = MPV_FRAME_CONTROL;
+    dev.send_midi_knob_config(&protocol::MidiKnobConfig {
+        setup_index: 3,
+        control_index: f as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_KNOB_CC_BASE + f as u8,
+        nrpn_address: 0,
+        min_value: 0,
+        max_value: 127,
+        control_name: "\u{2190}Frame\u{2192}".to_string(),
+        color_scheme: 14, // red = disabled initially
+        haptic_mode: protocol::KnobHapticMode::Endless16Step,
+        haptic_indent1: 0xFF,
+        haptic_indent2: 0xFF,
+        haptic_steps: mpv::FRAME_STEPS,
+        step_names: vec!["".to_string(); mpv::FRAME_STEPS as usize],
+    })?;
+    dev.send_midi_button_config(&protocol::MidiButtonConfig {
+        setup_index: 3,
+        control_index: f as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_BUTTON_CC_BASE + f as u8,
+        nrpn_address: 0xFFFF,
+        min_value: 0,
+        max_value: 127,
+        control_name: "Disabled".to_string(),
+        color_scheme: 14, // red
+        led_on_color: 14,
+        led_off_color: 14,
+        haptic_mode: protocol::SwitchHapticMode::Push,
+        haptic_steps: 0,
+        step_names: vec!["".to_string(); 16],
+    })?;
+
+    // Speed knob — centre-indent with max_value=90 so the midpoint CC (45)
+    // lands at 12 o'clock (-90°).  Deflecting CW speeds up, CCW slows down.
+    // Software spring-return timer snaps speed back to 1.0x after 300ms.
+    let i = MPV_SPEED_CONTROL;
+    dev.send_midi_knob_config(&protocol::MidiKnobConfig {
+        setup_index: 3,
+        control_index: i as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_KNOB_CC_BASE + i as u8,
+        nrpn_address: 0,
+        min_value: 0,
+        max_value: mpv::MAX_CC as u16,
+        control_name: "Speed".to_string(),
+        color_scheme: 9, // blue
+        haptic_mode: protocol::KnobHapticMode::CentreIndent,
+        haptic_indent1: 0xFF,
+        haptic_indent2: 0xFF,
+        haptic_steps: 0,
+        step_names: vec!["".to_string(); 16],
+    })?;
+
+    send_mpv_speed_display(dev, 1.0)?;
+
+    dev.end_config_update()?;
+    Ok(())
+}
+
+/// Update the bottom display to show the current speed.
+fn update_mpv_speed_display(dev: &mut protocol::Device, speed: f64) -> Result<()> {
+    dev.start_config_update()?;
+    send_mpv_speed_display(dev, speed)?;
+    dev.end_config_update()
+}
+
+/// Update the frame control display based on paused state.
+fn update_mpv_frame_display(dev: &mut protocol::Device, paused: bool) -> Result<()> {
+    let (label, color) = if paused {
+        ("Jog", 9u8) // blue when active
+    } else {
+        ("Disabled", 14u8) // red when disabled
+    };
+    let f = MPV_FRAME_CONTROL;
+    dev.start_config_update()?;
+    // Update knob color to match state
+    dev.send_midi_knob_config(&protocol::MidiKnobConfig {
+        setup_index: 3,
+        control_index: f as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_KNOB_CC_BASE + f as u8,
+        nrpn_address: 0,
+        min_value: 0,
+        max_value: 127,
+        control_name: "\u{2190}Frame\u{2192}".to_string(),
+        color_scheme: color,
+        haptic_mode: protocol::KnobHapticMode::Endless16Step,
+        haptic_indent1: 0xFF,
+        haptic_indent2: 0xFF,
+        haptic_steps: mpv::FRAME_STEPS,
+        step_names: vec!["".to_string(); mpv::FRAME_STEPS as usize],
+    })?;
+    // Update button display
+    dev.send_midi_button_config(&protocol::MidiButtonConfig {
+        setup_index: 3,
+        control_index: f as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_BUTTON_CC_BASE + f as u8,
+        nrpn_address: 0xFFFF,
+        min_value: 0,
+        max_value: 127,
+        control_name: label.to_string(),
+        color_scheme: color,
+        led_on_color: 14,
+        led_off_color: 14,
+        haptic_mode: protocol::SwitchHapticMode::Push,
+        haptic_steps: 0,
+        step_names: vec!["".to_string(); mpv::FRAME_STEPS as usize],
+    })?;
+    dev.end_config_update()
+}
+
+/// Send button config for MPV speed display (raw, no transaction — use inside a batch).
+fn send_mpv_speed_display(dev: &mut protocol::Device, speed: f64) -> Result<()> {
+    let label = mpv::speed_label(speed);
+    let i = MPV_SPEED_CONTROL;
+    dev.send_midi_button_config(&protocol::MidiButtonConfig {
+        setup_index: 3,
+        control_index: i as u8,
+        control_mode: protocol::ControlMode::Cc7Bit,
+        control_channel: midi::MIDI_CHANNEL,
+        control_param: midi::MPV_BUTTON_CC_BASE + i as u8,
+        nrpn_address: 0xFFFF,
+        min_value: 0,
+        max_value: 127,
+        control_name: label,
+        color_scheme: 9,
+        led_on_color: 14,
+        led_off_color: 70,
+        haptic_mode: protocol::SwitchHapticMode::Toggle,
+        haptic_steps: 0,
+        step_names: vec!["".to_string(); 16],
+    })
+}
+
 // ---- Volume conversions ----
 
 /// PipeWire: CC 0-127 maps to volume 0.0-1.0
@@ -1039,6 +1399,165 @@ impl HasNick for teamspeak::TsMember {
     fn nick(&self) -> &str {
         &self.nick
     }
+}
+
+/// Flash patched firmware to the Roto-Control via RP2040 bootloader.
+///
+/// 1. Send MAINTENANCE_ENTER_MAINTENANCE + MAINTENANCE_ENTER_BOOTLOADER over serial
+/// 2. Wait for RPI-RP2 mass storage device to mount
+/// 3. Copy the UF2 file to the mounted drive
+fn flash_firmware() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Locate the UF2 file next to the binary, or in firmware/
+    let uf2_path = {
+        let exe = std::env::current_exe().context("Cannot determine executable path")?;
+        let exe_dir = exe.parent().unwrap();
+        let candidates = [
+            exe_dir.join("roto_control_rp2040_v3.1.0_patched.uf2"),
+            exe_dir.join("../firmware/roto_control_rp2040_v3.1.0_patched.uf2"),
+            std::path::PathBuf::from("firmware/roto_control_rp2040_v3.1.0_patched.uf2"),
+        ];
+        candidates
+            .into_iter()
+            .find(|p| p.exists())
+            .context(
+                "Patched firmware not found. Place roto_control_rp2040_v3.1.0_patched.uf2 \
+                 next to the binary or in firmware/",
+            )?
+    };
+    let uf2_data = std::fs::read(&uf2_path)?;
+    info!(
+        "Firmware: {} ({} bytes)",
+        uf2_path.display(),
+        uf2_data.len()
+    );
+
+    // Find and open the Roto-Control serial port
+    let port_path =
+        find_roto_control_port().context("Roto-Control not found. Is it plugged in?")?;
+    info!("Found Roto-Control at {}", port_path);
+
+    {
+        let mut dev = protocol::Device::new(
+            serialport::new(&port_path, 115200)
+                .timeout(std::time::Duration::from_secs(3))
+                .open()
+                .with_context(|| format!("Failed to open {}", port_path))?,
+        );
+
+        let ver = dev.get_version()?;
+        info!(
+            "Current firmware: v{}.{}.{}-{}",
+            ver.major, ver.minor, ver.patch, ver.commit
+        );
+
+        info!("Entering bootloader...");
+        if let Err(e) = dev.enter_bootloader() {
+            // Expected — the device reboots and the serial port disappears
+            debug!("Bootloader entry returned error (expected): {}", e);
+        }
+    }
+
+    // Wait for RPI-RP2 mass storage to appear (auto-mount or block device)
+    info!("Waiting for RPI-RP2 drive...");
+    let mount_path = {
+        let mut found = None;
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            // Check common auto-mount locations first
+            for pattern in &["/run/media/*/RPI-RP2", "/media/*/RPI-RP2", "/mnt/RPI-RP2"] {
+                if let Ok(entries) = glob_paths(pattern) {
+                    if let Some(path) = entries.into_iter().next() {
+                        found = Some(path);
+                        break;
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+
+            // NixOS / no-automount fallback: find the block device via /dev/disk/by-id
+            // and mount it ourselves
+            if let Ok(entries) = std::fs::read_dir("/dev/disk/by-id") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains("RPI_RP2") && name.ends_with("-part1") {
+                        let dev = std::fs::canonicalize(entry.path())?;
+                        let mnt = std::path::PathBuf::from("/tmp/rpi-rp2");
+                        std::fs::create_dir_all(&mnt)?;
+                        info!("Auto-mounting {} at {}", dev.display(), mnt.display());
+                        let status = std::process::Command::new("sudo")
+                            .args(["mount", &dev.to_string_lossy(), &mnt.to_string_lossy()])
+                            .status();
+                        if status.map(|s| s.success()).unwrap_or(false) {
+                            found = Some(mnt);
+                        }
+                        break;
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+            eprint!(".");
+        }
+        eprintln!();
+        found.context(format!(
+            "RPI-RP2 drive did not appear within 30s.\n\
+             If the device entered bootloader mode, mount it manually and copy the UF2 file:\n  \
+             cp {} /run/media/$USER/RPI-RP2/",
+            uf2_path.display()
+        ))?
+    };
+
+    info!("Found RPI-RP2 at {}", mount_path.display());
+    let dest = mount_path.join("firmware.uf2");
+
+    // Try direct write first, fall back to sudo cp if permission denied
+    if std::fs::write(&dest, &uf2_data).is_err() {
+        info!("Direct write failed, using sudo...");
+        let tmp = std::env::temp_dir().join("proto-control-fw.uf2");
+        std::fs::write(&tmp, &uf2_data)
+            .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
+        let status = std::process::Command::new("sudo")
+            .args(["cp", &tmp.to_string_lossy(), &dest.to_string_lossy()])
+            .status()
+            .context("Failed to run sudo cp")?;
+        if !status.success() {
+            anyhow::bail!("sudo cp failed with status {}", status);
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // Sync to ensure the write reaches the device before it auto-reboots
+    unsafe { libc::sync() };
+
+    info!("Firmware written. Device will reboot automatically.");
+    info!("Done! The Roto-Control should reappear in ~5 seconds.");
+    Ok(())
+}
+
+/// Simple path glob for /run/media/*/RPI-RP2 style patterns (single wildcard).
+fn glob_paths(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
+    let mut results = Vec::new();
+    if let Some(star_pos) = pattern.find('*') {
+        let parent = &pattern[..star_pos];
+        let suffix = &pattern[star_pos + 1..];
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(suffix.trim_start_matches('/'));
+                if candidate.exists() {
+                    results.push(candidate);
+                }
+            }
+        }
+    } else if std::path::Path::new(pattern).exists() {
+        results.push(std::path::PathBuf::from(pattern));
+    }
+    Ok(results)
 }
 
 fn find_roto_control_port() -> Option<String> {

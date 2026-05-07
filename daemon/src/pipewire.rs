@@ -51,11 +51,36 @@ struct PwNodeProps {
     media_name: Option<String>,
     #[serde(rename = "application.process.id")]
     process_id: Option<u32>,
+    #[serde(rename = "client.id")]
+    client_id: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct PwClient {
+    id: u32,
+    info: Option<PwClientInfo>,
+}
+
+#[derive(Deserialize)]
+struct PwClientInfo {
+    props: Option<PwClientProps>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct PwClientProps {
+    #[serde(rename = "application.process.binary")]
+    process_binary: Option<String>,
+    #[serde(rename = "application.process.id")]
+    process_id: Option<u32>,
 }
 
 /// List all audio output streams currently connected in PipeWire.
 pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
+    // Filter to Node objects only: we never read Ports/Clients/etc, and pw-dump
+    // emits malformed JSON for some Port `params` blocks (bare arrays where keys
+    // are required), which makes the full dump unparseable.
     let output = Command::new("pw-dump")
+        .arg("Node")
         .output()
         .context("Failed to run pw-dump. Is PipeWire running?")?;
 
@@ -68,6 +93,11 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 
     let nodes: Vec<PwNode> =
         serde_json::from_slice(&output.stdout).context("Failed to parse pw-dump output")?;
+
+    // Some streams (e.g. SDL apps like CS2) don't set application.process.binary
+    // or application.process.id on the Node — only the owning Client has them.
+    // Pull Clients separately and build a lookup so we can fill in those gaps.
+    let client_props_by_id = load_client_props();
 
     let mut streams = Vec::new();
 
@@ -95,8 +125,17 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
             .or_else(|| props.node_name.clone())
             .unwrap_or_else(|| format!("Stream {}", node.id));
 
-        let pid = props.process_id;
-        let binary = props.process_binary.as_deref().unwrap_or("");
+        let client_fallback = props
+            .client_id
+            .and_then(|id| client_props_by_id.get(&id));
+        let pid = props
+            .process_id
+            .or_else(|| client_fallback.and_then(|c| c.process_id));
+        let binary = props
+            .process_binary
+            .as_deref()
+            .or_else(|| client_fallback.and_then(|c| c.process_binary.as_deref()))
+            .unwrap_or("");
         let app_id = props.portal_app_id.as_deref().unwrap_or("");
         let resolved = config.resolve(binary, app_id, &default_name);
 
@@ -146,6 +185,22 @@ pub fn list_streams(config: &Config) -> Result<Vec<AudioStream>> {
 
     debug!("Found {} audio streams", streams.len());
     Ok(streams)
+}
+
+/// Run `pw-dump Client` and return a map from Client id -> props. Failures are
+/// non-fatal: an empty map just disables the fallback path.
+fn load_client_props() -> std::collections::HashMap<u32, PwClientProps> {
+    let Ok(output) = Command::new("pw-dump").arg("Client").output() else {
+        return std::collections::HashMap::new();
+    };
+    if !output.status.success() {
+        return std::collections::HashMap::new();
+    }
+    let clients: Vec<PwClient> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    clients
+        .into_iter()
+        .filter_map(|c| Some((c.id, c.info?.props?)))
+        .collect()
 }
 
 /// Truncate a string to at most `max` characters (not bytes).

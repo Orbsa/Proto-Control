@@ -21,6 +21,8 @@ pub const DISCORD_KNOB_CC_BASE: u8 = 33; // Discord knobs   CC 33-48
 pub const DISCORD_BUTTON_CC_BASE: u8 = 49; // Discord buttons CC 49-64
 pub const TS3_KNOB_CC_BASE: u8 = 65; // TS3 knobs   CC 65-80
 pub const TS3_BUTTON_CC_BASE: u8 = 81; // TS3 buttons CC 81-96
+pub const MPV_KNOB_CC_BASE: u8 = 97; // MPV knobs   CC 97-112
+pub const MPV_BUTTON_CC_BASE: u8 = 113; // MPV buttons CC 113-128
 
 pub const NUM_CONTROLS: usize = 16; // 2 pages × 8 controls per setup
 
@@ -33,6 +35,8 @@ pub enum DeviceEvent {
     DiscordButtonPress { index: usize, value: u8 },
     Ts3KnobTurn { index: usize, value: u8 },
     Ts3ButtonPress { index: usize, value: u8 },
+    MpvKnobTurn { index: usize, value: u8 },
+    MpvButtonPress { index: usize, value: u8 },
 }
 
 /// Open the MIDI output connection to the Roto-Control.
@@ -127,6 +131,16 @@ pub fn open_input() -> Result<(MidiInputConnection<()>, mpsc::Receiver<DeviceEve
                         index: (cc - TS3_BUTTON_CC_BASE) as usize,
                         value,
                     }
+                } else if cc >= MPV_KNOB_CC_BASE && cc < MPV_KNOB_CC_BASE + n {
+                    DeviceEvent::MpvKnobTurn {
+                        index: (cc - MPV_KNOB_CC_BASE) as usize,
+                        value,
+                    }
+                } else if cc >= MPV_BUTTON_CC_BASE && cc < MPV_BUTTON_CC_BASE + n {
+                    DeviceEvent::MpvButtonPress {
+                        index: (cc - MPV_BUTTON_CC_BASE) as usize,
+                        value,
+                    }
                 } else {
                     debug!("MIDI RX: ignoring CC {}", cc);
                     return;
@@ -205,5 +219,25 @@ pub fn send_ts3_button_value(
         bail!("TS3 button index {} out of range", index);
     }
     conn.send(&[0xB0 | MIDI_CHANNEL, TS3_BUTTON_CC_BASE + index as u8, value])
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+pub fn send_mpv_knob_value(conn: &mut MidiOutputConnection, index: usize, value: u8) -> Result<()> {
+    if index >= NUM_CONTROLS {
+        bail!("MPV knob index {} out of range", index);
+    }
+    conn.send(&[0xB0 | MIDI_CHANNEL, MPV_KNOB_CC_BASE + index as u8, value])
+        .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
+}
+
+pub fn send_mpv_button_value(
+    conn: &mut MidiOutputConnection,
+    index: usize,
+    value: u8,
+) -> Result<()> {
+    if index >= NUM_CONTROLS {
+        bail!("MPV button index {} out of range", index);
+    }
+    conn.send(&[0xB0 | MIDI_CHANNEL, MPV_BUTTON_CC_BASE + index as u8, value])
         .map_err(|e| anyhow::anyhow!("Failed to send MIDI: {}", e))
 }

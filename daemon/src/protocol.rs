@@ -23,6 +23,10 @@ const MIDI: u8 = 0x02;
 const PLUGIN: u8 = 0x03;
 const MAINTENANCE: u8 = 0x04;
 
+// Maintenance subcommands
+const MAINTENANCE_ENTER_MAINTENANCE: u8 = 0x01;
+const MAINTENANCE_ENTER_BOOTLOADER: u8 = 0x06;
+
 // General subcommands
 const GENERAL_GET_FW_VERSION: u8 = 0x01;
 const GENERAL_GET_ATARI_MODE: u8 = 0x02;
@@ -88,9 +92,17 @@ pub enum ControlMode {
 
 #[derive(Debug, Clone, Copy)]
 pub enum KnobHapticMode {
-    Normal = 0,
-    NStep = 1,
+    /// Free 360° rotation, no detents.
+    Continuous = 0,
+    /// Evenly-spaced detents (2–16 steps). Also supports 2 custom indent
+    /// positions via `haptic_indent1`/`haptic_indent2` when `haptic_steps` is 0.
+    Detented = 1,
+    /// Single magnetic indent at the centre (12 o'clock) position.
     CentreIndent = 2,
+    /// 16 evenly-spaced detents with endless 360° rotation (no endstops).
+    /// This is value 3 from the PLUGIN protocol — works through MIDI commands
+    /// because the motor controller shares the haptic engine.
+    Endless16Step = 3,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -414,6 +426,17 @@ impl Device {
             }
         }
         self.end_config_update()
+    }
+
+    /// Enter bootloader mode for firmware flashing.
+    /// The device will reboot into RP2040 picoboot/mass-storage mode.
+    /// The serial port will disconnect after this call.
+    pub fn enter_bootloader(&mut self) -> Result<()> {
+        self.send_command(MAINTENANCE, MAINTENANCE_ENTER_MAINTENANCE, &[])?;
+        std::thread::sleep(Duration::from_secs(1));
+        // Platform byte: 0x00 = Linux, 0x01 = Windows
+        let _ = self.send_command(MAINTENANCE, MAINTENANCE_ENTER_BOOTLOADER, &[0x00]);
+        Ok(())
     }
 }
 
