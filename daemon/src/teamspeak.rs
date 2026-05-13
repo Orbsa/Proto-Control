@@ -22,19 +22,20 @@ use std::time::Duration;
 pub fn default_socket_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     // Flatpak TS3 maps its $HOME to ~/.var/app/com.teamspeak.TeamSpeak3/ on the host,
-    // so the plugin writes the socket at that path.
+    // so the plugin writes the socket at that path. Prefer native; only use Flatpak
+    // when the native .ts3client directory doesn't exist.
+    let native = format!("{}/.ts3client/protocontrol-ts3.sock", home);
     let flatpak = format!(
-        "{}/.var/app/com.teamspeak.TeamSpeak3/.ts3client/rotocontrol-ts3.sock",
+        "{}/.var/app/com.teamspeak.TeamSpeak3/.ts3client/protocontrol-ts3.sock",
         home
     );
-    let native = format!("{}/.ts3client/rotocontrol-ts3.sock", home);
-    if std::path::Path::new(&flatpak)
+    if std::path::Path::new(&native)
         .parent()
         .map_or(false, |p| p.exists())
     {
-        flatpak
-    } else {
         native
+    } else {
+        flatpak
     }
 }
 
